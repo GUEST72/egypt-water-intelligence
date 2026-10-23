@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://egypt-water-intelligence.local/schemas/district-sensor.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "run_id", "district_id", "inlet_link_id", "pressure_monitor_node_id", "interval_start_utc", "interval_end_utc", "event_time_utc", "inlet_flow_m3_s", "inlet_volume_m3", "pressure_m_h2o", "availability_time_utc", "quality_code"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "district_id": {"type": "string", "pattern": "^D[0-9]{3}$"},
+    "inlet_link_id": {"type": "string", "minLength": 1},
+    "pressure_monitor_node_id": {"type": "string", "minLength": 1},
+    "interval_start_utc": {"type": "string", "format": "date-time"},
+    "interval_end_utc": {"type": "string", "format": "date-time"},
+    "event_time_utc": {"type": "string", "format": "date-time"},
+    "inlet_flow_m3_s": {"type": "number", "minimum": 0},
+    "inlet_volume_m3": {"type": "number", "minimum": 0},
+    "pressure_m_h2o": {"type": "number", "minimum": 0},
+    "availability_time_utc": {"type": "string", "format": "date-time"},
+    "quality_code": {"type": "string", "enum": ["valid", "noisy", "stuck", "corrupted"]}
+  }
+}

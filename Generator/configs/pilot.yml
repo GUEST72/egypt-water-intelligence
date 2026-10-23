@@ -1,0 +1,107 @@
+schema_version: "1.0.0"
+run:
+  seed: 20261022
+  start_time_utc: "2026-01-01T00:00:00Z"
+  duration_minutes: 36000
+  output_root: output
+utility:
+  district_count: 6
+  meter_count: 600
+  timezone: Africa/Cairo
+demand:
+  customer_classes:
+    residential:
+      share: 0.9
+      baseline_mean_m3_s: 0.0000105
+      baseline_sigma: 0.35
+      profile_multiplier: 1.0
+    small_commercial:
+      share: 0.1
+      baseline_mean_m3_s: 0.000021
+      baseline_sigma: 0.30
+      profile_multiplier: 1.15
+  weekly_multipliers:
+    weekday: 1.0
+    thursday: 1.04
+    friday: 1.0
+    saturday: 0.98
+  friday_prayer:
+    enabled: true
+    start_local: "12:00"
+    end_local: "13:30"
+    residential_multiplier: 0.75
+    small_commercial_multiplier: 0.90
+    rebound_multiplier: 1.05
+    rebound_minutes: 60
+hydraulics:
+  engine: epanet_2_2
+  demand_model: PDD
+  hydraulic_timestep_seconds: 60
+  pattern_timestep_seconds: 60
+  report_timestep_seconds: 60
+  minimum_pressure_m: 5.0
+  required_pressure_m: 20.0
+  pressure_exponent: 0.5
+  source_head_m: 45.0
+  balance_tolerance_m3: 0.0001
+scenarios:
+  - scenario_id: background-loss-d6
+    type: persistent_background_loss
+    district_id: D006
+    start_minute: 0
+    end_minute: 36000
+    emitter_coefficient: 0.00001
+  - scenario_id: burst-d1
+    type: burst
+    district_id: D001
+    start_minute: 1800
+    end_minute: 1920
+    emitter_coefficient: 0.00012
+  - scenario_id: gradual-leak-d2
+    type: gradual_leak
+    district_id: D002
+    start_minute: 3600
+    end_minute: 4320
+    emitter_coefficient: 0.00008
+    stages: 3
+  - scenario_id: supply-disturbance-d3
+    type: supply_disturbance
+    district_id: D003
+    start_minute: 5400
+    end_minute: 5520
+    source_head_delta_m: -30.0
+  - scenario_id: demand-surge-d1
+    type: demand_surge
+    district_id: D001
+    start_minute: 7200
+    end_minute: 7320
+    demand_multiplier: 1.6
+  - scenario_id: persistent-loss-d5
+    type: persistent_background_loss
+    district_id: D005
+    start_minute: 14400
+    end_minute: 28800
+    emitter_coefficient: 0.000008
+  - scenario_id: burst-d4
+    type: burst
+    district_id: D004
+    start_minute: 21600
+    end_minute: 21720
+    emitter_coefficient: 0.0001
+sensor:
+  noise_relative_stddev: 0.0
+
+faults:
+  - stream: meter
+    type: null_value
+    every_n: 25000
+    field: consumed_volume_m3
+
+  - stream: district
+    type: null_value
+    every_n: 5000
+    field: pressure_m_h2o
+
+  - stream: meter
+    type: duplicate
+    every_n: 25000  

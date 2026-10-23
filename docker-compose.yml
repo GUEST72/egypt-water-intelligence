@@ -1,0 +1,115 @@
+services:
+  kafka:
+    image: apache/kafka:3.7.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: controller,broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: water-intelligence-kraft
+    volumes:
+      - kafka-data:/tmp/kraft-combined-logs
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  minio:
+    image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
+    user: "0:0"
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-wateradminsecret}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: water
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8080:8080"
+
+  init:
+    build:
+      context: ./Generator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
+      MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
+      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    entrypoint: ["python"]
+    command: ["scripts/init_services.py"]
+
+  generator:
+    build:
+      context: ./Generator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
+      MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
+      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    volumes:
+      - ./Generator/output:/app/output
+    command: ["--help"]
+
+  archiver:
+    build:
+      context: ./Generator
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    command: ["archive-kafka", "--bucket", "${MINIO_EVENT_BUCKET:-water-events}"]
+
+volumes:
+  kafka-data:
+  minio-data:

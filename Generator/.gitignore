@@ -1,0 +1,8 @@
+output/
+*.bin
+*.inp
+*.rpt
+*.hyd
+*.egg-info/
+__pycache__/
+.pytest_cache/

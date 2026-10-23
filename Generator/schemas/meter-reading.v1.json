@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://egypt-water-intelligence.local/schemas/meter-reading.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "event_id", "run_id", "meter_id", "district_id", "interval_start_utc", "interval_end_utc", "event_time_utc", "consumed_volume_m3", "availability_time_utc", "quality_code"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "event_id": {"type": "string", "minLength": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "meter_id": {"type": "string", "pattern": "^M[0-9]{6}$"},
+    "district_id": {"type": "string", "pattern": "^D[0-9]{3}$"},
+    "interval_start_utc": {"type": "string", "format": "date-time"},
+    "interval_end_utc": {"type": "string", "format": "date-time"},
+    "event_time_utc": {"type": "string", "format": "date-time"},
+    "consumed_volume_m3": {"type": "number", "minimum": 0},
+    "availability_time_utc": {"type": "string", "format": "date-time"},
+    "quality_code": {"type": "string", "enum": ["valid", "noisy", "stuck", "corrupted"]}
+  }
+}

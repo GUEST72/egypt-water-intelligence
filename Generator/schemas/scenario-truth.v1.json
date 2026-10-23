@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://egypt-water-intelligence.local/schemas/scenario-truth.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "scenario_id", "scenario_type", "scenario_class", "district_id", "start_time_utc", "end_time_utc", "physical_parameters", "expected_effects"],
+  "properties": {
+    "schema_version": {"const": "1.0.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "scenario_id": {"type": "string", "minLength": 1},
+    "scenario_type": {"type": "string"},
+    "scenario_class": {"type": "string", "enum": ["leak_incident", "operational_disturbance", "demand_confounder"]},
+    "district_id": {"type": "string", "pattern": "^D[0-9]{3}$"},
+    "start_time_utc": {"type": "string", "format": "date-time"},
+    "end_time_utc": {"type": "string", "format": "date-time"},
+    "physical_parameters": {"type": "object"},
+    "expected_effects": {"type": "object"}
+  }
+}
