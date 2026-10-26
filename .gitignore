@@ -1,3 +1,13 @@
 flink/scripts/savepoints.log
 analysis/*.csv
+analysis/*.png
 .venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+Generator/output/
+*.egg-info/
+.ruff_cache/
+backups/
+inspection/

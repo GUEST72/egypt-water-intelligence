@@ -16,10 +16,20 @@ def main() -> None:
             admin = KafkaAdminClient(bootstrap_servers=bootstrap, client_id="water-init")
             existing = set(admin.list_topics())
             topics = [
-                NewTopic("water.district-sensors.v1", num_partitions=1, replication_factor=1),
-                NewTopic("water.meter-readings.v1", num_partitions=1, replication_factor=1),
+                NewTopic(name, num_partitions=1, replication_factor=1)
+                for name in (
+                    "water.district-sensors.v1",
+                    "water.meter-readings.v1",
+                    "water.district-sensors.clean.v1",
+                    "water.dead-letter.district.v1",
+                    "water.district-features.15m.v1",
+                    "water.district-relative.15m.v1",
+                    "water.district-alerts.v1",
+                )
             ]
-            admin.create_topics([topic for topic in topics if topic.name not in existing])
+            missing = [topic for topic in topics if topic.name not in existing]
+            if missing:
+                admin.create_topics(missing)
             admin.close()
             break
         except Exception:
@@ -36,6 +46,7 @@ def main() -> None:
         os.environ.get("MINIO_RAW_BUCKET", "water-raw"),
         os.environ.get("MINIO_RESTRICTED_BUCKET", "water-restricted"),
         os.environ.get("MINIO_EVENT_BUCKET", "water-events"),
+        os.environ.get("MINIO_WAREHOUSE_BUCKET", "water-warehouse"),
     ):
         if not client.bucket_exists(bucket):
             client.make_bucket(bucket)

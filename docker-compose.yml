@@ -1,5 +1,51 @@
+# Include the resolved network name in each service's config hash. Compose can
+# otherwise reuse a container whose HostConfig.NetworkMode names a removed network.
+x-network-labels: &network-labels
+  ewi.network: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}_default
+
+x-water-environment: &water-environment
+  KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+  MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
+  MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
+  MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+  MINIO_WAREHOUSE_BUCKET: ${MINIO_WAREHOUSE_BUCKET:-water-warehouse}
+
+x-airflow: &airflow
+  labels: *network-labels
+  image: water-airflow:local
+  build: ./orchestration
+  profiles: [pipeline]
+  user: "${AIRFLOW_UID:-50000}:0"
+  environment: &airflow-environment
+    <<: *water-environment
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__PARALLELISM: 4
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:${AIRFLOW_DB_PASSWORD:-airflowlocal}@airflow-db/airflow
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    AIRFLOW_ADMIN_USERNAME: ${AIRFLOW_ADMIN_USERNAME:-amr}
+    AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-waterlocal}
+    EWI_PROJECT: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}
+    EWI_NETWORK: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}_default
+    EWI_OUTPUT_VOLUME: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}_pipeline-output
+    EWI_GENERATOR_IMAGE: water-generator:local
+    EWI_SPARK_IMAGE: water-spark:local
+    CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberglocal}
+    AWS_REGION: us-east-1
+  volumes:
+    - ./orchestration/dags:/opt/airflow/dags:ro
+    - airflow-logs:/opt/airflow/logs
+  depends_on:
+    airflow-db:
+      condition: service_healthy
+
 services:
   kafka:
+    labels: *network-labels
     image: apache/kafka:3.7.1
     environment:
       KAFKA_NODE_ID: 1
@@ -23,6 +69,7 @@ services:
       retries: 12
 
   minio:
+    labels: *network-labels
     image: alpine/minio:RELEASE.2025-10-15T17-29-55Z
     user: "0:0"
     command: server /data --console-address ":9001"
@@ -41,6 +88,7 @@ services:
       retries: 12
 
   kafka-ui:
+    labels: *network-labels
     image: provectuslabs/kafka-ui:v0.7.2
     depends_on:
       kafka:
@@ -52,9 +100,12 @@ services:
       - "8080:8080"
 
   init:
+    labels: *network-labels
+    image: water-generator:local
     build:
       context: ./Generator
     environment:
+      <<: *water-environment
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
@@ -71,6 +122,8 @@ services:
     command: ["scripts/init_services.py"]
 
   generator:
+    labels: *network-labels
+    image: water-generator:local
     build:
       context: ./Generator
     environment:
@@ -93,6 +146,8 @@ services:
     command: ["--help"]
 
   archiver:
+    labels: *network-labels
+    image: water-generator:local
     build:
       context: ./Generator
     environment:
@@ -110,6 +165,168 @@ services:
         condition: service_completed_successfully
     command: ["archive-kafka", "--bucket", "${MINIO_EVENT_BUCKET:-water-events}"]
 
+  flink-jobmanager:
+    labels: *network-labels
+    build: ./flink
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        parallelism.default: 2
+        jobmanager.memory.process.size: 2g
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///opt/flink/state/checkpoints
+        state.savepoints.dir: file:///opt/flink/state/savepoints
+        execution.checkpointing.interval: 30 s
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs
+      - ./flink/tools:/opt/flink/tools:ro
+      - ./flink/tests:/opt/flink/tests:ro
+      - flink-state:/opt/flink/state
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  flink-taskmanager:
+    labels: *network-labels
+    build: ./flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: |
+        jobmanager.rpc.address: flink-jobmanager
+        taskmanager.numberOfTaskSlots: 4
+        taskmanager.memory.process.size: 4g
+        parallelism.default: 2
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///opt/flink/state/checkpoints
+        state.savepoints.dir: file:///opt/flink/state/savepoints
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs
+      - flink-state:/opt/flink/state
+    depends_on:
+      - flink-jobmanager
+
+  catalog-db:
+    labels: *network-labels
+    image: postgres:16.6
+    profiles: [pipeline]
+    environment:
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberglocal}
+      POSTGRES_DB: iceberg
+    volumes:
+      - catalog-data:/var/lib/postgresql/data
+      - ./infrastructure/catalog-db/init.sql:/docker-entrypoint-initdb.d/iceberg.sql:ro
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U iceberg -d iceberg"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  trino:
+    labels: *network-labels
+    image: trinodb/trino:484
+    profiles: [pipeline]
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberglocal}
+    ports: ["8082:8080"]
+    volumes:
+      - ./infrastructure/trino/catalog:/etc/trino/catalog:ro
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, /usr/lib/trino/bin/health-check]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  # Build-only runtime. Airflow starts a disposable Spark container for each task.
+  spark:
+    labels: *network-labels
+    image: water-spark:local
+    build: ./batch
+    profiles: [tools]
+    environment:
+      <<: *water-environment
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberglocal}
+      AWS_REGION: us-east-1
+
+  airflow-db:
+    labels: *network-labels
+    image: postgres:16.6
+    profiles: [pipeline]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD:-airflowlocal}
+      POSTGRES_DB: airflow
+    volumes: [airflow-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U airflow -d airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  airflow-init:
+    <<: *airflow
+    entrypoint: [/bin/bash, -ec]
+    command:
+      - |
+        airflow db migrate
+        if ! airflow users list --output json | python -c 'import json,os,sys; sys.exit(0 if any(u["username"] == os.environ["AIRFLOW_ADMIN_USERNAME"] for u in json.load(sys.stdin)) else 1)'; then
+          airflow users create --username "$$AIRFLOW_ADMIN_USERNAME" --password "$$AIRFLOW_ADMIN_PASSWORD" --firstname Amr --lastname Yousri --role Admin --email amr@example.local
+        fi
+
+  airflow-webserver:
+    <<: *airflow
+    command: webserver
+    ports: ["8083:8080"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, "curl --fail http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
+  airflow-scheduler:
+    <<: *airflow
+    command: scheduler
+    group_add: ["${DOCKER_GID:-0}"]
+    volumes:
+      - ./orchestration/dags:/opt/airflow/dags:ro
+      - airflow-logs:/opt/airflow/logs
+      # Keep generated runs in Compose's volume lifecycle; task containers mount it read/write.
+      - pipeline-output:/opt/airflow/source-output:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD-SHELL, "curl --fail http://localhost:8974/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+
 volumes:
   kafka-data:
   minio-data:
+  flink-state:
+  catalog-data:
+  airflow-data:
+  airflow-logs:
+  pipeline-output:
+    name: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}_pipeline-output
+
+networks:
+  default:
+    name: ${COMPOSE_PROJECT_NAME:-egypt-water-intelligence}_default

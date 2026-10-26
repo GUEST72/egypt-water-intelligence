@@ -12,3 +12,7 @@ RUN curl -fSL -o /opt/flink/lib/flink-sql-connector-kafka-3.4.0-1.20.jar \
     https://repo.maven.apache.org/maven2/org/apache/flink/flink-sql-connector-kafka/3.4.0-1.20/flink-sql-connector-kafka-3.4.0-1.20.jar
 
 RUN mkdir -p /opt/flink/state/checkpoints /opt/flink/state/savepoints && chown -R flink:flink /opt/flink/state    
+
+COPY jobs /opt/flink/jobs
+COPY tools /opt/flink/tools
+COPY tests /opt/flink/tests

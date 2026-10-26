@@ -1,0 +1,25 @@
+schema_version: "1.0.0"
+run:
+  seed: 20261026
+  start_time_utc: "2026-01-01T00:00:00Z"
+  duration_minutes: 60
+  output_root: output
+utility:
+  district_count: 6
+  meter_count: 12
+  timezone: Africa/Cairo
+hydraulics:
+  engine: epanet_2_2
+  demand_model: PDD
+  hydraulic_timestep_seconds: 60
+  pattern_timestep_seconds: 60
+  report_timestep_seconds: 60
+  minimum_pressure_m: 5.0
+  required_pressure_m: 20.0
+  pressure_exponent: 0.5
+  source_head_m: 45.0
+  balance_tolerance_m3: 0.0001
+scenarios: []
+sensor:
+  noise_relative_stddev: 0.0
+faults: []

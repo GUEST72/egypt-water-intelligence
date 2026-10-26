@@ -52,6 +52,15 @@ def archive_minio(
         raise RuntimeError("install the generator with the minio extra") from exc
 
     root = Path(run_dir)
+    required = [
+        "_RUN_COMPLETE", "run-manifest.json", "validation-report.json", "config.yml",
+        "public/districts.ndjson", "public/meters.ndjson", "public/network.inp",
+        "delivery/district-sensors.ndjson", "delivery/meter-readings.ndjson",
+        "restricted/scenario-truth.ndjson", "restricted/fault-truth.ndjson",
+    ]
+    missing = [name for name in required if not (root / name).is_file()]
+    if missing:
+        raise ValueError(f"Cannot archive incomplete run {root}: {missing}")
     client = Minio(
         endpoint,
         access_key=access_key,
@@ -109,4 +118,6 @@ def archive_minio(
             )
             count += 1
 
-    return count
+    # A batch reader can use this marker as the publication barrier.
+    client.fput_object(raw_bucket, f"{root.name}/_RUN_COMPLETE", str(root / "_RUN_COMPLETE"))
+    return count + 1

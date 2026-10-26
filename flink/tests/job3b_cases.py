@@ -1,7 +1,7 @@
 """Small, hand-checkable test for job3b_district_alerts.py.
 
-  python job3b_test_cases.py make  > features_cases.ndjson
-  python job3b_test_cases.py check alerts_out.ndjson
+  python flink/tests/job3b_cases.py make  > features_cases.ndjson
+  python flink/tests/job3b_cases.py check alerts_out.ndjson
 
 12 windows x 6 districts of 15-minute features (starting 2026-01-01T00:00).
 Baseline: every district near 0.0012 m3/s and 40 m (within +-1.5% of peers).

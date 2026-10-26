@@ -1,5 +1,7 @@
 # Guide for Run Kafka and Flink
 
+This is the retained manual component workflow. For the current integrated stack, settings and verified startup fixes, use the [complete usage guide](../USER_GUIDE.md). Run manual/reset scripts in a separate project from an Airflow-owned stream. Timing and memory figures below describe the earlier manual workflow, not the complete Airflow/Spark/Trino stack.
+
 This guide takes you from a Windows machine with nothing installed to a full run of the water pipeline: the Kafka part that publishes the data, and the Flink part that cleans it and raises alerts. Follow it top to bottom and you should not need to ask anyone anything. Every step says what it does and why we do it.
 
 A complete run takes about 20 minutes once everything is installed. The first time you run it, add extra time for downloading and building the Docker images, which depends on your internet speed.
@@ -215,7 +217,7 @@ A fresh Kafka has no topics and a fresh MinIO has no buckets. This command creat
 docker compose up -d flink-jobmanager flink-taskmanager
 ```
 
-This starts the two Flink services. They are defined in `docker-compose.override.yml`, which Docker Compose reads automatically as long as it sits next to the main compose file. The first run builds the Flink image, which also takes a few minutes.
+This starts the two Flink services defined in `docker-compose.yml`. The first run builds the Flink image, which also takes a few minutes.
 
 Open http://localhost:8081. You should see the Flink dashboard with one task manager and four task slots. If the page does not load, wait a minute and refresh, since Flink needs a short while to start.
 

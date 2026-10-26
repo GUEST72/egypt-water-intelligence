@@ -1,7 +1,7 @@
 """Hand-checkable test for job3c_level_shift.py.
 
-  python job3c_test_cases.py make  > relative_cases.ndjson     # 12 days x 96 windows x 6 districts
-  python job3c_test_cases.py check alerts_out.ndjson
+  python flink/tests/job3c_cases.py make  > relative_cases.ndjson  # 12 days x 96 windows x 6 districts
+  python flink/tests/job3c_cases.py check alerts_out.ndjson
 
 Input is the 'relative' topic (rel_flow per district and 15-minute window), day 0 =
 2026-01-01. Baseline rel_flow is 1.0 everywhere with cond = NULL.

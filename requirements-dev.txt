@@ -1,0 +1,8 @@
+# Python 3.11 or 3.12. Containerized application startup needs only Docker/Compose.
+apache-airflow==2.10.5
+docker==7.1.0
+kafka-python-ng==2.2.3
+minio==7.2.15
+pytest>=8,<9
+PyYAML>=6,<7
+-e ./Generator[dev,kafka,minio]

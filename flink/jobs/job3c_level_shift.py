@@ -48,7 +48,7 @@ from pyflink.table.udf import udf
 
 @udf(result_type=DataTypes.DOUBLE())
 def median_of(a, b, c, d, e, f):
-    # Same function as job3b / udf_test.py: median of the non-null inputs.
+    # Same median as job3b and tests/runtime/udf_check.py: ignore null inputs.
     vals = sorted(v for v in (a, b, c, d, e, f) if v is not None)
     if not vals:
         return None
