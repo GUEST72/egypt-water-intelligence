@@ -2,7 +2,7 @@
 
 This guide explains how to operate the current Egypt Water Intelligence checkout. For the reasons behind its design and a record of changes, read [What changed and why](IMPLEMENTATION_AND_DECISIONS.md). For Amr AbdEl-Monem's development contract, read [his handoff](AMR_ABDEL_MONEM_HANDOFF.md).
 
-The integrated batch entrypoint is currently `handoff_smoke`: it verifies raw input counts and writes integration evidence. Analytical facts, dimensions, water balance and direct Flink-to-Iceberg sinks remain team work. Running services successfully is separate from completing a full data-pipeline run.
+The integrated batch entrypoint is currently `handoff_smoke`: it verifies raw input counts and writes integration evidence. For the standalone starter that writes cleaned events, references, quality counts and a fifteen-minute water balance, follow [Amr AbdEl-Monem's handoff](AMR_ABDEL_MONEM_HANDOFF.md). Further analytical work, starter DAG integration and direct Flink-to-Iceberg sinks remain team work. Running services successfully is separate from completing a full data-pipeline run.
 
 ## Contents
 

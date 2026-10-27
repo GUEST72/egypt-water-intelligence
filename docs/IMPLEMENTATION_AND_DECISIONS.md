@@ -15,9 +15,7 @@ Prepared for Amr Yousri and the SIC Team 4 project. This records the work comple
 - [9. Remaining team work](#9-remaining-team-work)
 - [10. Repository organization and cleanup](#10-repository-organization-and-cleanup)
 
-## 1. Request and starting point
-
-Amr Yousri's request was to prepare the repository for Amr AbdEl-Monem and make Airflow orchestrate the complete pipeline. The attached technical document supplied architecture and team context; the user's request determined the work to perform.
+## 1. Starting point
 
 At the start of this work, the tracked checkout already contained the hydraulic generator, Kafka, MinIO, the Kafka archiver, Flink jobs, manual Flink scripts and analysis utilities. The shared Compose definition did not provide the Airflow/Spark/Iceberg/Trino integration implemented here. Some Docker containers from an older local configuration existed independently of the current tracked files; their presence did not mean that configuration was reproducible from this checkout.
 

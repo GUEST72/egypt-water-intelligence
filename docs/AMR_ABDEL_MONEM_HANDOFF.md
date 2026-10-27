@@ -1,120 +1,145 @@
-# Handoff from Amr Yousri to Amr AbdEl-Monem
+# Amr AbdEl-Monem: batch development without the full pipeline
 
-For complete operating instructions, see the [usage guide](USER_GUIDE.md). For the implementation history and rationale, see [what changed and why](IMPLEMENTATION_AND_DECISIONS.md).
+Your work is to turn generated measurements into cleaned data, dimensions, facts and water-balance tables using PySpark and Iceberg. You need **MinIO + catalog-db + Trino**, with Spark running only when you execute a job. Airflow, Kafka and Flink are not required for this workflow.
 
-Amr Yousri owns Airflow and the shared Docker Compose environment. Amr AbdEl-Monem owns PySpark transformations and analytical Iceberg tables. Ahmed owns the Flink rules and streaming/Trino integration. These ownership boundaries follow the attached technical document; runtime schemas and paths below reflect the code in this checkout.
+## 1. Where to work
 
-The infrastructure now provides a Spark runtime, persistent Iceberg JDBC catalog, warehouse in MinIO, and Trino connected to the same catalog. The default Spark job is an **infrastructure smoke test**, not the analytical batch implementation. It counts real delivery inputs, checks the manifest, writes one Iceberg evidence row, reads it back in Spark, and lets Airflow verify it through Trino.
+| Location | Your work |
+| --- | --- |
+| `batch/jobs/build_batch.py` | Working starter: download raw inputs, clean/deduplicate events, write references and a fifteen-minute water balance. Extend this job for your analytical requirements. |
+| `batch/jobs/validate_batch.py` | Check saved tables, input accounting, reference keys, interval coverage, balance calculations and Trino read-back. |
+| `batch/jobs/test_batch.py` | Small fixture tests for cleaning, duplicates, missing coverage and validation failures. |
+| `batch/jobs/handoff_smoke.py` | Use `spark_session()` as the working Spark/Iceberg connection example and its reader as a MinIO example. Keep this infrastructure check available. |
+| `batch/Dockerfile` | Add batch dependencies if needed. It copies `batch/jobs/` into the image. |
+| `Generator/schemas/` | Read `meter-reading.v1.json` and `district-sensor.v1.json` for the actual event fields. |
+| [Batch requirements](guides/batch-processing.md) | Follow the detailed cleaning, table-grain and water-balance requirements. |
 
-## First run
+Amr Yousri handles Airflow and shared infrastructure; Ahmed handles Flink. Integrate with Airflow after your standalone jobs pass.
 
-Install Docker Desktop with Linux containers and Compose v2. Enable Docker Desktop's WSL integration if using WSL. Allow roughly 12–16 GB RAM for the complete parallel stack. The first build downloads Python packages and Spark/Iceberg jars.
+## 2. Start only what you need
 
-From the repository root in PowerShell:
-
-```powershell
-Copy-Item .env.example .env
-.\scripts\start-pipeline.ps1
-```
-
-On Linux/WSL:
+Run all commands from the repository root with Docker running. If `.env` is missing, copy `.env.example` to `.env` once. Preserve an existing `.env`.
 
 ```bash
-cp .env.example .env
-./scripts/start-pipeline.sh
+docker compose --profile pipeline up -d --wait minio catalog-db trino
+docker compose build spark
 ```
 
-The scripts preserve an existing `.env`. On Linux they detect the Docker socket group. If starting Compose yourself, set `DOCKER_GID` in `.env` to `stat -c %g /var/run/docker.sock`. Use simple URL-safe characters in the local Airflow database password because it is embedded in a connection URL.
+Explicitly naming these three services does not start the entire pipeline. Spark runs `local[2]` in a temporary container; no Spark master is needed.
 
-Open http://localhost:8083. The example account is `amr` / `waterlocal`; `.env` controls the credentials. Trigger `egypt_water_pipeline`, choosing `config=smoke` and `batch_job=handoff_smoke`. Unpause `egypt_water_health` for monitoring between runs. The smoke configuration produces 360 district events and 48 meter readings: six districts, twelve meters, sixty minutes, no injected faults. The four Flink jobs run at parallelism one and remain running after the DAG completes.
+**To reuse this workstation's pilot data, keep `COMPOSE_PROJECT_NAME=ewi-pilot`.** A different project name or computer has different storage and needs its own uploaded data; see section 6.
 
-Use a fresh `COMPOSE_PROJECT_NAME` for a different generated configuration. The existing Flink jobs do not retain `run_id` in their downstream records, so one Kafka namespace must not contain multiple simulated datasets. Stop the previous stack before changing the project name if reusing the same host ports. Existing manual Kafka data is intentionally rejected by the DAG rather than adopted without verification.
+## 3. Choose the input and check the runtime once
 
-The pilot configuration is the existing 25-day, six-district, 600-meter scenario with delivery faults. The manifest determines the run ID and counts; no historical run directory is assumed to exist in a clone.
+Open [MinIO](http://localhost:9001) using the credentials in `.env`. In the raw bucket (default `water-raw`), select a `run-…` folder containing `_RUN_COMPLETE`.
 
-## Connections and exact input contract
+The previously verified pilot here is `run-4fae7f16e89b947e`: **216,000 delivered district records and 1,440,057 delivered meter records**. Confirm it exists in your MinIO. Replace that example ID in every command if using another run. The manifest is the source of truth for counts.
 
-| Component | Inside Docker | Host interface |
-| --- | --- | --- |
-| Kafka | `kafka:9092` | Kafka UI http://localhost:8080 |
-| MinIO API | `minio:9000` / `http://minio:9000` for SDKs needing a URL | http://localhost:9000 |
-| MinIO Console | `minio:9001` | http://localhost:9001 |
-| Flink | `flink-jobmanager:8081` | http://localhost:8081 |
-| Iceberg JDBC | `jdbc:postgresql://catalog-db:5432/iceberg` | Internal only |
-| Trino | `trino:8080` | http://localhost:8082 |
-| Airflow | `airflow-webserver:8080` | http://localhost:8083 |
-
-For a generated `run-<16 hex characters>`, `archive-minio` writes:
+Read these objects under `water-raw/<run_id>/`:
 
 ```text
-water-raw/
-  <run_id>/_RUN_COMPLETE
-  <run_id>/artifacts/districts.ndjson
-  <run_id>/artifacts/meters.ndjson
-  <run_id>/artifacts/network.inp
-  <run_id>/artifacts/run-manifest.json
-  <run_id>/artifacts/validation-report.json
-  <run_id>/delivery/district-sensors.ndjson
-  <run_id>/delivery/meter-readings.ndjson
-water-restricted/
-  <run_id>/restricted/config.yml
-  <run_id>/restricted/scenario-truth.ndjson
-  <run_id>/restricted/fault-truth.ndjson
-water-events/
-  events/<topic>/<run_id>/part-<partition>-<first_offset>-<last_offset>.ndjson.gz
-  orchestration/stream.json
-water-warehouse/
-  # Iceberg metadata and Parquet, managed through the catalog
+_RUN_COMPLETE                       # require before loading
+artifacts/run-manifest.json          # run ID and expected delivery counts
+artifacts/validation-report.json     # generation validation must have passed
+artifacts/districts.ndjson           # reference data
+artifacts/meters.ndjson              # reference data
+delivery/district-sensors.ndjson     # one-minute district measurements
+delivery/meter-readings.ndjson       # fifteen-minute meter measurements
 ```
 
-Bucket names come from `.env`. The warehouse path must also match the Trino properties file. The raw completion marker is uploaded last, after all required artifacts. Read it before starting a batch load. `artifacts/` holds public reference data and generation evidence. `delivery/` holds faulted measurement copies, which are also published to Kafka. The clean `public/` measurement files remain local generator evidence; they are **not** uploaded by `archive-minio`. `config.yml` belongs to the restricted bucket because it reveals planted incidents.
+Delivery files include intentional duplicates and nulls. Preserve `run_id` and `event_id`; keep raw objects unchanged. Do not read evaluation answers from `water-restricted` as transformation inputs. Bucket names and credentials come from the environment.
 
-All event files are NDJSON. The Kafka archive contains gzip-compressed NDJSON, grouped by topic, run and partition. Preserve run ID and event ID during processing. The raw archive includes corrupt/null records and duplicates by design. Never clean it in place or read `water-restricted` as a transformation input.
+Run the existing infrastructure check directly:
 
-Airflow-generated files live in the `<project>_pipeline-output` Docker volume mounted at `/app/output` in generator task containers. Manual generator commands still use `Generator/output/` on the host. Batch processing reads MinIO, so neither local path is a prerequisite for Amr AbdEl-Monem's work.
+```bash
+docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/handoff_smoke.py --run-id run-4fae7f16e89b947e
 
-## Spark/Iceberg contract
+docker compose exec -T trino trino --execute "SELECT * FROM water.handoff.pipeline_runs WHERE run_id = 'run-4fae7f16e89b947e'"
+```
 
-The image is `water-spark:local`, built from `batch/Dockerfile`:
+Expected: Spark exits successfully and Trino returns one row with `216000` and `1440057` for this pilot. The job checks actual MinIO input counts, writes Iceberg evidence and reads it back. Its name is `handoff_smoke`, but it checks whichever generated run you select. It does not validate your analytical transformations.
 
-- Spark 3.5.3 / Scala 2.12, Iceberg 1.7.1 runtime and AWS bundle, PostgreSQL driver 42.7.5.
-- The Spark base image uses Python 3.8.10 and MinIO SDK 7.2.10. Airflow and local tests use newer Python runtimes and retain their separate SDK pin; [MinIO SDK 7.2.15 requires Python 3.9+](https://pypi.org/project/minio/7.2.15/).
-- Spark runs `local[2]` in a disposable container with a 1 GB driver. Adjust the Dockerfile for larger jobs.
-- Catalog name `water`, implementation `org.apache.iceberg.jdbc.JdbcCatalog`, JDBC schema version `V1`.
-- JDBC user `iceberg`, password from `CATALOG_DB_PASSWORD`.
-- S3FileIO talks to MinIO with path-style access and region `us-east-1`; default warehouse `s3://water-warehouse/`.
-- Spark uses UTC. `spark_session()` in `batch/jobs/handoff_smoke.py` is a working configuration example.
+## 4. Run and extend the starter
 
-The catalog metadata persists in `catalog-data`; Iceberg files persist in MinIO. Spark and Trino use the same catalog name (`water`) and warehouse. Trino catalog files use environment placeholders for credentials. The JDBC metadata schema is initialized by PostgreSQL from `infrastructure/catalog-db/init.sql` on its first startup.
+`build_batch.py` accepts `--run-id` and writes to `water.analytics` by default. Both scripts accept `--namespace amr_dev` to use separate development tables. They use explicit schemas, UTC timestamps and the existing Spark connection settings. Each write replaces only the selected run's rows.
 
-To test the existing raw run independently of Airflow:
+| Table | One row represents |
+| --- | --- |
+| `districts` / `meters` | One reference entity per run |
+| `district_clean` / `meter_clean` | One accepted event per run and event ID |
+| `rejected_events` | One rejected delivery, including raw JSON and reasons |
+| `quality_report` | Input, accepted, rejected and duplicate counts for one stream/run |
+| `water_balance_15m` | One district and UTC fifteen-minute interval, with coverage counts |
 
-```powershell
+The starter rejects malformed records, unknown references, invalid times, non-finite/negative measures, null required measures and quality codes other than `valid`/`noisy`. A null pressure rejects the district event, so that minute is missing from balance coverage. Identical accepted deliveries collapse; conflicting accepted copies of an event fail the build. Rejected deliveries are counted before deduplication. Incomplete intervals have a null gap; complete intervals with zero inlet have a null gap percentage. Extend these explicit policies as needed.
+
+For the pilot ID above, this policy produces 215,957 clean district events and 1,439,943 clean meter events, with 43 rejected district deliveries and 114 rejected meter deliveries. The duplicated null meter readings are rejected too, so the valid-duplicate counter is zero for this dataset.
+
+This is a starting point: daily facts, business-specific indicators and alert consolidation still need your implementation. Writes to different tables are sequential, so rerun the build after a partial failure and require a successful validator before using the outputs.
+
+For raw ingestion, a first implementation can download selected objects with the MinIO SDK into a temporary directory and read those files with Spark. This works with the current single-container runtime. Iceberg's S3FileIO settings alone do **not** enable `spark.read.json('s3a://…')`; distributed raw reads need a tested S3A connector or another staging strategy.
+
+Run the starter, then repeat this loop after edits:
+
+```bash
+# Rebuild after edits: job files are copied into the image.
 docker compose build spark
-docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/handoff_smoke.py --run-id run-0123456789abcdef
+docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/build_batch.py --run-id run-4fae7f16e89b947e
 ```
 
-Replace the example ID with the manifest's actual run ID, already uploaded to MinIO. The Spark image entrypoint is `spark-submit`; pass the script path and its arguments, not another `spark-submit` command.
+The entrypoint already runs `spark-submit`; pass only the script and arguments. Your input comes from MinIO, so there is no need to regenerate data, publish Kafka messages or trigger Airflow after each edit.
 
-Query the evidence through Trino:
+## 5. Test and validate your results
 
-```powershell
-docker compose exec trino trino --execute "SELECT * FROM water.handoff.pipeline_runs"
+Run the included `unittest` fixtures after edits. They cover valid data, duplicates, conflicting copies, null/non-finite measurements, invalid references/timestamps, malformed JSON, a foreign run, missing coverage and a hand-calculated balance. They also deliberately corrupt a balance to check that validation fails. No running storage services are needed for these tests:
+
+```bash
+docker compose build spark
+docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/test_batch.py
 ```
 
-## Add the analytical job
+Then run `validate_batch.py` against the saved tables. It exits with an error if a check fails. Keep these requirements covered as you extend the job:
 
-1. Put your job and reusable modules under `batch/jobs/`. Accept `--run-id` and obtain credentials/endpoints from the existing environment. The smoke job demonstrates both conventions. The image copies this folder, so rebuild `spark` after changes.
-2. Read the exact `artifacts/` and `delivery/` paths above. Do not require the source run folder or restricted truth. For large-scale distributed raw reads, add a tested S3A connector matching Spark's Hadoop version, or a staging strategy. Iceberg's S3FileIO config alone does not configure `spark.read.json('s3a://…')`. The smoke job streams the raw objects with the MinIO SDK and is not a distributed raw-ingestion design.
-3. Define your target namespace, grains, keys, partitioning, UTC interval alignment, rejected-row evidence and rerun behavior. Keep your analytical tables separate from `water.handoff.pipeline_runs`.
-4. Add an approved job name/path to `runtime.spark_batch()` and the `batch_job` DAG parameter enum. Avoid arbitrary shell commands or arbitrary script paths in DAG parameters.
-5. Extend `runtime.verify_trino()` to check your actual table counts, keys and water-balance invariants. The existing check verifies smoke evidence only.
-6. Rebuild `spark`, trigger the DAG, and supply the output table contract and quality report for review.
+| Check | Passing result |
+| --- | --- |
+| Input accounting | Raw counts match the manifest's `delivery_district_records` and `delivery_meter_records`. Accepted, rejected and duplicate counts reconcile under your documented processing order. |
+| Cleaning | Rejected rows have reasons; required keys, timestamps, measures and reference relationships satisfy your rules. Null handling is explicit. |
+| Unique keys | Clean events are unique by `(run_id, event_id)`; analytical rows are unique at each declared table grain. |
+| Interval alignment | Compare the sum of 15 one-minute inlet volumes with meter volumes for the same fifteen-minute interval. Join on interval boundaries: district event time is interval start; meter event time is interval end. |
+| Water balance | `gap_m3 = inlet_volume_m3 - metered_consumption_m3` within a documented tolerance. Report missing coverage and define zero-inlet percentage handling. |
+| Saved output | Spark and Trino can read expected counts, keys and sample calculations for this run. |
+| Safe rerun | A second build gives the same keys, counts and values, without changing other runs. |
 
-The analytical acceptance criteria are in [the batch guide](guides/batch-processing.md). At minimum: explicit input schemas, accepted/rejected/duplicate counts, deterministic deduplication within each run, reference-key validation, aligned inlet/meter intervals, stable output grains, run-scoped replacement or merge, and successful read-back through Spark and Trino. The daily water-balance fact described in the PDF should derive from aligned intervals; do not compare a minute of inlet volume with fifteen minutes of consumption. Do not invent source fields that the current generator does not provide.
+Validate and inspect the saved tables:
 
-## Remaining team work
+```bash
+docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/validate_batch.py --run-id run-4fae7f16e89b947e
 
-Amr AbdEl-Monem's facts, dimensions, cleaning and water-balance transformations are still to be implemented. Ahmed's current Flink jobs write Kafka topics; direct streaming writes to Iceberg and streaming alert tables remain his integration work. The smoke test does not certify alert accuracy, completeness of the final event-time window, or the proposed star schema. The existing offline evaluator remains available through `flink/scripts/evaluate.sh` for manual runs with local restricted truth.
+docker compose exec -T trino trino --execute "SHOW TABLES FROM water.analytics"
+```
 
-Use [the orchestration runbook](ORCHESTRATION.md) for retries, monitoring and shutdown. Keep generated output, secrets and runtime state out of Git.
+The validator reads every table through Spark, compares its row count through Trino, and prints a final JSON report with counts and content checksums. Run the build and validator again and compare those summaries to check rerun stability. Also query a few known intervals through Trino. A successful build exit alone is not enough. Extend the validator alongside any new tables or business rules.
+
+Hand over the code, table schemas/grains, exact test and SQL commands, run ID, and a short quality report with counts and sample calculations. Then coordinate with Amr Yousri to register your job in `runtime.spark_batch()`, the DAG's `batch_job` enum and `runtime.verify_trino()`.
+
+## 6. Only if no generated data is uploaded yet
+
+Skip this section when section 3 already passes. With the three services from section 2 running, create the warehouse bucket in MinIO if missing (`MINIO_WAREHOUSE_BUCKET`, default `water-warehouse`). Then:
+
+```bash
+docker compose build generator
+docker compose run --rm --no-deps generator generate --config /app/configs/pilot.yml
+```
+
+Copy the printed dataset ID and replace `run-REPLACE_ME` below:
+
+```bash
+docker compose run --rm --no-deps generator validate --run-dir /app/output/run-REPLACE_ME
+docker compose run --rm --no-deps generator archive-minio --run-dir /app/output/run-REPLACE_ME
+```
+
+The uploader creates the raw/restricted buckets if missing. `--no-deps` keeps Kafka/init from starting. No publication or full pipeline run is needed. Use `/app/configs/smoke.yml` for a quick small dataset; it has no planted faults, so also test cleaning on pilot and targeted fixtures.
+
+If a run is missing, check the project name and MinIO folder. Use a dataset ID (`run-…`), not the Airflow execution name `pilot-first-run`. If code is missing or stale, rebuild `spark`. Preserve MinIO/catalog volumes between sessions; `down -v` deletes them. Keep credentials and generated/runtime files out of Git.
+
+For detailed requirements, see the [batch guide](guides/batch-processing.md); for full-stack operation, see the [usage guide](USER_GUIDE.md).

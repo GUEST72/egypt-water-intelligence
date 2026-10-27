@@ -42,4 +42,4 @@ docs/            Operating guides and implementation decisions
 
 The [generator](Generator/README.md) and [manual Kafka/Flink guide](docs/guides/manual-kafka-flink.md) remain available for component development. Airflow uses its own named output volume; manual generation still writes to `Generator/output/`. Use separate Compose projects for manual experiments and orchestrated runs.
 
-The included batch smoke job verifies infrastructure. Analytical facts/dimensions, water-balance transformations and direct Flink-to-Iceberg sinks remain team deliverables.
+The integrated batch smoke job verifies infrastructure. A [standalone batch starter](docs/AMR_ABDEL_MONEM_HANDOFF.md) cleans generated inputs and writes reference tables, quality evidence and a fifteen-minute water balance. Daily facts, further analytical transformations and direct Flink-to-Iceberg sinks remain team deliverables.

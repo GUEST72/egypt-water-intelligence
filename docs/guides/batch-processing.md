@@ -1,8 +1,10 @@
 # Batch processing guide: raw data to analytical tables
 
-Amr AbdEl-Monem owns PySpark batch transformation and analytical Iceberg storage. Amr Yousri owns Airflow and shared Compose infrastructure. Start with [Amr AbdEl-Monem's handoff](../AMR_ABDEL_MONEM_HANDOFF.md) for the working runtime, exact MinIO paths, first-run commands and entrypoint registration. The [orchestration runbook](../ORCHESTRATION.md) covers scheduling, monitoring and retries.
+Amr AbdEl-Monem owns PySpark batch transformation and analytical Iceberg storage. Amr Yousri owns Airflow and shared Compose infrastructure. Start with [Amr AbdEl-Monem's handoff](../AMR_ABDEL_MONEM_HANDOFF.md) for a simple development and validation workflow using only MinIO, the catalog database, Trino and disposable Spark containers. Integrate with Airflow after the standalone jobs pass. The [orchestration runbook](../ORCHESTRATION.md) covers scheduling, monitoring and retries.
 
 The integrated stack now includes Spark, a persistent JDBC Iceberg catalog and Trino. `batch/jobs/handoff_smoke.py` proves that real raw objects can be read and a Spark-written Iceberg record can be queried through Trino. It does not implement the analytical tables described here.
+
+The standalone starter `batch/jobs/build_batch.py` implements reference tables, cleaned events, rejected-delivery evidence, quality counts and a coverage-aware fifteen-minute balance. `validate_batch.py` checks those saved outputs through Spark and Trino; `test_batch.py` provides small fixtures. These jobs can run without Airflow, Kafka or Flink and are not yet registered in the DAG. Daily facts and further analytical requirements below remain work to extend the starter.
 
 ## Source contract
 
