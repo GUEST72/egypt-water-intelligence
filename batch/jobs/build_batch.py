@@ -36,21 +36,34 @@ TABLE_KEYS = {
     "district_clean": ["event_id"],
     "meter_clean": ["event_id"],
     "water_balance_15m": ["district_id", "interval_start_utc"],
+    "dim_district": ["district_id"],
+    "dim_meter": ["meter_id"],
+    "dim_interval": ["interval_start_utc"],
+    "fact_water_balance_15m": ["district_id", "interval_start_utc"],
+    "fact_meter_consumption_15m": ["meter_id", "interval_start_utc"],
+    "gold_district_daily_water_balance": ["district_id", "date_utc"],
     "quality_report": ["stream"],
 }
-TABLES = tuple(TABLE_KEYS) + ("rejected_events",)
+GOLD_TABLES = (
+    "dim_district", "dim_meter", "dim_interval",
+    "fact_water_balance_15m", "fact_meter_consumption_15m",
+    "gold_district_daily_water_balance",
+)
+TABLES = tuple(name for name in TABLE_KEYS if name not in GOLD_TABLES) + ("rejected_events",) + GOLD_TABLES
 TIMES = ("interval_start_utc", "interval_end_utc", "event_time_utc", "availability_time_utc")
 
 
 def arguments(description):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--namespace", default="analytics", help="Iceberg namespace in catalog water")
+    parser.add_argument("--namespace", default="analytics", help="Silver and quality namespace in catalog water")
+    parser.add_argument("--gold-namespace", default="gold", help="Gold star-schema namespace in catalog water")
     args = parser.parse_args()
     if not re.fullmatch(r"run-[0-9a-f]{16}", args.run_id):
         parser.error("--run-id must be run- followed by 16 lowercase hex digits")
-    if not re.fullmatch(r"[a-z][a-z0-9_]*", args.namespace):
-        parser.error("--namespace must contain lowercase letters, digits or underscores")
+    for name, value in (("--namespace", args.namespace), ("--gold-namespace", args.gold_namespace)):
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", value):
+            parser.error(name + " must contain lowercase letters, digits or underscores")
     return args
 
 
@@ -162,6 +175,73 @@ def water_balance(district, meter, districts, meters, start_seconds, end_seconds
                                                 100 * F.col("gap_m3") / F.col("inlet_volume_m3")))
 
 
+def dimensional_outputs(districts, meters, meter_clean, balance):
+    """Build Gold dimensions, facts and a joined daily aggregate."""
+    dim_district = districts
+    dim_meter = meters
+    dim_interval = (
+        balance.select("run_id", "interval_start_utc", "interval_end_utc").distinct()
+        .withColumn("interval_key", F.col("interval_start_utc").cast("long"))
+        .withColumn("date_utc", F.to_date("interval_start_utc"))
+        .withColumn("hour_utc", F.hour("interval_start_utc"))
+        .withColumn("minute_utc", F.minute("interval_start_utc"))
+        .withColumn(
+            "quarter_of_day",
+            F.hour("interval_start_utc") * 4 + F.floor(F.minute("interval_start_utc") / 15).cast("int") + 1,
+        )
+    )
+
+    fact_balance = balance.withColumn(
+        "interval_key", F.col("interval_start_utc").cast("long")
+    )
+    fact_meter = meter_clean.select(
+        "run_id", "meter_id", "district_id", "event_id", "interval_start_utc", "consumed_volume_m3"
+    ).withColumn("interval_key", F.col("interval_start_utc").cast("long"))
+
+    # Join the facts to descriptive dimensions, then aggregate only complete
+    # intervals so missing readings are not treated as zero water consumption.
+    district_attributes = dim_district.select(
+        "run_id", "district_id", "inlet_link_id", "pressure_monitor_node_id",
+        "has_cross_boundary_transfer", "has_internal_storage",
+    )
+    interval_attributes = dim_interval.select(
+        "run_id", "interval_start_utc", "date_utc"
+    )
+    daily_source = (
+        fact_balance.join(interval_attributes, ["run_id", "interval_start_utc"], "inner")
+        .join(district_attributes, ["run_id", "district_id"], "inner")
+    )
+    group_columns = [
+        "run_id", "district_id", "date_utc", "inlet_link_id",
+        "pressure_monitor_node_id", "has_cross_boundary_transfer", "has_internal_storage",
+    ]
+    daily = daily_source.groupBy(*group_columns).agg(
+        F.count("*").cast("long").alias("total_periods"),
+        F.sum(F.when(F.col("complete"), 1).otherwise(0)).cast("long").alias("complete_periods"),
+        F.sum(F.when(~F.col("complete"), 1).otherwise(0)).cast("long").alias("incomplete_periods"),
+        F.sum(F.when(F.col("complete"), F.col("inlet_volume_m3")).otherwise(0.0)).alias("inlet_volume_m3"),
+        F.sum(F.when(F.col("complete"), F.col("metered_consumption_m3")).otherwise(0.0)).alias("metered_consumption_m3"),
+    )
+    daily = (
+        daily.withColumn(
+            "coverage_pct", 100.0 * F.col("complete_periods") / F.col("total_periods")
+        )
+        .withColumn("gap_m3", F.col("inlet_volume_m3") - F.col("metered_consumption_m3"))
+        .withColumn(
+            "gap_pct",
+            F.when(F.col("inlet_volume_m3") > 0, 100.0 * F.col("gap_m3") / F.col("inlet_volume_m3")),
+        )
+    )
+    return {
+        "dim_district": dim_district,
+        "dim_meter": dim_meter,
+        "dim_interval": dim_interval,
+        "fact_water_balance_15m": fact_balance,
+        "fact_meter_consumption_15m": fact_meter,
+        "gold_district_daily_water_balance": daily,
+    }
+
+
 def write_run(frame, table, run_id):
     if not frame.sparkSession.catalog.tableExists(table):
         frame.writeTo(table).using("iceberg").partitionedBy("run_id").tableProperty("format-version", "2").create()
@@ -169,7 +249,7 @@ def write_run(frame, table, run_id):
         frame.writeTo(table).overwrite(F.col("run_id") == run_id)
 
 
-def build(spark, run_id, namespace):
+def build(spark, run_id, namespace, gold_namespace="gold"):
     client, bucket, manifest = source_manifest(run_id)
     with TemporaryDirectory(prefix="water-batch-") as folder:
         refs, raw = {}, {}
@@ -197,20 +277,31 @@ def build(spark, run_id, namespace):
             rejects.append(rejected)
             counts.append(count)
             cached.extend([clean, cache])
+        balance = water_balance(
+            cleaned["district"], cleaned["meter"], refs["district"], refs["meter"], start, end
+        )
+        gold = dimensional_outputs(refs["district"], refs["meter"], cleaned["meter"], balance)
         outputs = {
             "districts": refs["district"], "meters": refs["meter"],
             "district_clean": cleaned["district"], "meter_clean": cleaned["meter"],
             "rejected_events": rejects[0].unionByName(rejects[1]),
-            "water_balance_15m": water_balance(cleaned["district"], cleaned["meter"], refs["district"], refs["meter"], start, end),
-            # Written last: evidence that the preceding table writes finished.
+            "water_balance_15m": balance,
+            **gold,
+            # Written last: evidence that all preceding table writes finished.
             "quality_report": spark.createDataFrame(counts, "run_id string, stream string, raw_records long, accepted_records long, rejected_records long, duplicate_records long"),
         }
         spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + namespace)
+        spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + gold_namespace)
         for name, frame in outputs.items():
-            write_run(frame, "water." + namespace + "." + name, run_id)
+            if name == "quality_report":
+                continue
+            target_namespace = gold_namespace if name in GOLD_TABLES else namespace
+            write_run(frame, "water." + target_namespace + "." + name, run_id)
+        # The quality report is written last as the completion marker for the whole run.
+        write_run(outputs["quality_report"], "water." + namespace + ".quality_report", run_id)
         for cache in cached:
             cache.unpersist()
-    return {"run_id": run_id, "namespace": namespace, "counts": [dict(zip(
+    return {"run_id": run_id, "namespace": namespace, "gold_namespace": gold_namespace, "counts": [dict(zip(
         ["run_id", "stream", "raw_records", "accepted_records", "rejected_records", "duplicate_records"], row)) for row in counts]}
 
 
@@ -219,7 +310,7 @@ def main():
     spark = spark_session()
     spark.sparkContext.setLogLevel("WARN")
     try:
-        print(json.dumps(build(spark, args.run_id, args.namespace), sort_keys=True))
+        print(json.dumps(build(spark, args.run_id, args.namespace, args.gold_namespace), sort_keys=True))
     finally:
         spark.stop()
 

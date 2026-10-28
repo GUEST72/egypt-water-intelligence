@@ -9,7 +9,7 @@ from urllib.request import Request, urlopen
 from pyspark import StorageLevel
 from pyspark.sql import functions as F
 
-from build_batch import TABLES, TABLE_KEYS, arguments, require, source_manifest, unique
+from build_batch import GOLD_TABLES, TABLES, TABLE_KEYS, arguments, require, source_manifest, unique
 from handoff_smoke import spark_session
 
 
@@ -97,12 +97,116 @@ def check_balance(tables, manifest):
                 .otherwise(F.col("gap_pct").isNull()), "Incorrect balance percentage")
 
 
-def validate(spark, run_id, namespace):
+def check_star_schema(tables):
+    districts, meters = tables["districts"], tables["meters"]
+    dim_district, dim_meter, dim_interval = (
+        tables["dim_district"], tables["dim_meter"], tables["dim_interval"]
+    )
+
+    # Dimensions must preserve the reference keys and attributes.
+    require(dim_district.count() == districts.count(), "dim_district count differs from districts")
+    require(dim_meter.count() == meters.count(), "dim_meter count differs from meters")
+    require(
+        not dim_district.select(*districts.columns).exceptAll(districts).take(1)
+        and not districts.exceptAll(dim_district.select(*districts.columns)).take(1),
+        "dim_district differs from districts",
+    )
+    require(
+        not dim_meter.select(*meters.columns).exceptAll(meters).take(1)
+        and not meters.exceptAll(dim_meter.select(*meters.columns)).take(1),
+        "dim_meter differs from meters",
+    )
+
+    balance = tables["water_balance_15m"]
+    expected_intervals = (
+        balance.select("run_id", "interval_start_utc", "interval_end_utc").distinct()
+        .withColumn("interval_key", F.col("interval_start_utc").cast("long"))
+        .withColumn("date_utc", F.to_date("interval_start_utc"))
+        .withColumn("hour_utc", F.hour("interval_start_utc"))
+        .withColumn("minute_utc", F.minute("interval_start_utc"))
+        .withColumn(
+            "quarter_of_day",
+            F.hour("interval_start_utc") * 4 + F.floor(F.minute("interval_start_utc") / 15).cast("int") + 1,
+        )
+    )
+    require(dim_interval.count() == expected_intervals.count(), "dim_interval count differs from the balance time grid")
+    no_bad_rows(
+        dim_interval,
+        (F.col("interval_key") == F.col("interval_start_utc").cast("long"))
+        & (F.col("date_utc") == F.to_date("interval_start_utc"))
+        & (F.col("hour_utc") == F.hour("interval_start_utc"))
+        & (F.col("minute_utc") == F.minute("interval_start_utc")),
+        "dim_interval has an incorrect time key or calendar attribute",
+    )
+
+    fact_balance = tables["fact_water_balance_15m"]
+    fact_meter = tables["fact_meter_consumption_15m"]
+    require(fact_balance.count() == balance.count(), "fact_water_balance_15m count differs from water_balance_15m")
+    no_bad_rows(
+        fact_balance,
+        F.col("interval_key") == F.col("interval_start_utc").cast("long"),
+        "Fact water balance has an incorrect interval key",
+    )
+    require(
+        not fact_balance.join(dim_district.select("run_id", "district_id"), ["run_id", "district_id"], "left_anti").take(1)
+        and not fact_balance.join(dim_interval.select("run_id", "interval_start_utc"), ["run_id", "interval_start_utc"], "left_anti").take(1),
+        "Fact water balance has a missing dimension key",
+    )
+    require(fact_meter.count() == tables["meter_clean"].count(), "fact_meter_consumption_15m count differs from meter_clean")
+    no_bad_rows(
+        fact_meter,
+        F.col("interval_key") == F.col("interval_start_utc").cast("long"),
+        "Fact meter consumption has an incorrect interval key",
+    )
+    require(
+        not fact_meter.join(dim_meter.select("run_id", "meter_id"), ["run_id", "meter_id"], "left_anti").take(1)
+        and not fact_meter.join(dim_district.select("run_id", "district_id"), ["run_id", "district_id"], "left_anti").take(1)
+        and not fact_meter.join(dim_interval.select("run_id", "interval_start_utc"), ["run_id", "interval_start_utc"], "left_anti").take(1),
+        "Fact meter consumption has a missing dimension key",
+    )
+
+    # Independently recompute the daily aggregate from the fifteen-minute fact.
+    expected_daily = balance.withColumn("date_utc", F.to_date("interval_start_utc")).groupBy(
+        "run_id", "district_id", "date_utc"
+    ).agg(
+        F.count("*").cast("long").alias("total_periods"),
+        F.sum(F.when(F.col("complete"), 1).otherwise(0)).cast("long").alias("complete_periods"),
+        F.sum(F.when(~F.col("complete"), 1).otherwise(0)).cast("long").alias("incomplete_periods"),
+        F.sum(F.when(F.col("complete"), F.col("inlet_volume_m3")).otherwise(0.0)).alias("inlet_volume_m3"),
+        F.sum(F.when(F.col("complete"), F.col("metered_consumption_m3")).otherwise(0.0)).alias("metered_consumption_m3"),
+    ).withColumn(
+        "coverage_pct", 100.0 * F.col("complete_periods") / F.col("total_periods")
+    ).withColumn(
+        "gap_m3", F.col("inlet_volume_m3") - F.col("metered_consumption_m3")
+    ).withColumn(
+        "gap_pct", F.when(F.col("inlet_volume_m3") > 0, 100.0 * F.col("gap_m3") / F.col("inlet_volume_m3"))
+    )
+    daily = tables["gold_district_daily_water_balance"]
+    keys = ["run_id", "district_id", "date_utc"]
+    require(daily.count() == expected_daily.count(), "Daily Gold aggregate has missing or extra district dates")
+    joined = expected_daily.alias("e").join(daily.alias("d"), keys, "full")
+    valid = (
+        F.col("e.run_id").isNotNull() & F.col("d.run_id").isNotNull()
+        & (F.col("e.total_periods") == F.col("d.total_periods"))
+        & (F.col("e.complete_periods") == F.col("d.complete_periods"))
+        & (F.col("e.incomplete_periods") == F.col("d.incomplete_periods"))
+        & close(F.col("e.inlet_volume_m3"), F.col("d.inlet_volume_m3"))
+        & close(F.col("e.metered_consumption_m3"), F.col("d.metered_consumption_m3"))
+        & close(F.col("e.gap_m3"), F.col("d.gap_m3"))
+        & close(F.col("e.coverage_pct"), F.col("d.coverage_pct"))
+        & F.when(F.col("e.gap_pct").isNull(), F.col("d.gap_pct").isNull())
+          .otherwise(close(F.col("e.gap_pct"), F.col("d.gap_pct")))
+    )
+    no_bad_rows(joined, valid, "Daily Gold aggregate does not reconcile with the fifteen-minute fact")
+
+
+def validate(spark, run_id, namespace, gold_namespace="gold"):
     _, _, manifest = source_manifest(run_id)
     tables, summaries = {}, {}
     try:
         for name in TABLES:
-            table = "water." + namespace + "." + name
+            table_namespace = gold_namespace if name in GOLD_TABLES else namespace
+            table = "water." + table_namespace + "." + name
             tables[name] = spark.table(table).filter(F.col("run_id") == run_id).persist(StorageLevel.DISK_ONLY)
             if name in TABLE_KEYS:
                 unique(tables[name], ["run_id"] + TABLE_KEYS[name], name)
@@ -126,7 +230,9 @@ def validate(spark, run_id, namespace):
             require(all(x is not None and x >= 0 for x in (row.raw_records, row.accepted_records, row.rejected_records, row.duplicate_records)), "Invalid accounting count")
             require(row.raw_records == row.accepted_records + row.rejected_records + row.duplicate_records, "Input accounting does not reconcile")
         check_balance(tables, manifest)
-        return {"status": "passed", "run_id": run_id, "namespace": namespace, "tables": summaries}
+        check_star_schema(tables)
+        return {"status": "passed", "run_id": run_id, "namespace": namespace,
+                "gold_namespace": gold_namespace, "tables": summaries}
     finally:
         for frame in tables.values():
             frame.unpersist()
@@ -137,7 +243,7 @@ def main():
     spark = spark_session()
     spark.sparkContext.setLogLevel("WARN")
     try:
-        print(json.dumps(validate(spark, args.run_id, args.namespace), sort_keys=True))
+        print(json.dumps(validate(spark, args.run_id, args.namespace, args.gold_namespace), sort_keys=True))
     finally:
         spark.stop()
 
