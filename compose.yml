@@ -1,0 +1,56 @@
+# Additive file: used ONLY together with the existing compose files (see iceberg/run_all.sh).
+# It adds services and one volume. It does not change kafka, minio, kafka-ui or flink.
+services:
+  iceberg-rest:
+    image: tabulario/iceberg-rest:1.6.0
+    user: "0:0"
+    environment:
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-wateradmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      AWS_REGION: us-east-1
+      CATALOG_WAREHOUSE: s3://water-warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_URI: jdbc:sqlite:file:/data/iceberg_catalog.db
+    volumes:
+      - iceberg-catalog:/data
+    ports:
+      - "8181:8181"
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  trino:
+    image: trinodb/trino:465
+    ports:
+      - "8082:8080"
+    volumes:
+      - ./iceberg/trino-catalog:/etc/trino/catalog:ro
+      - ./iceberg:/iceberg:ro
+    depends_on:
+      - iceberg-rest
+
+  iceberg-loader:
+    image: python:3.11-slim
+    profiles: ["tools"]
+    working_dir: /app
+    environment:
+      BOOTSTRAP: kafka:9092
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+      ICEBERG_URI: http://iceberg-rest:8181
+    volumes:
+      - ./iceberg:/app:ro
+      - ./Generator/output:/truth:ro
+    entrypoint: ["sh", "-c", "pip install -q 'pyiceberg[pyarrow]==0.12.0' kafka-python-ng minio && exec python load.py \"$@\"", "--"]
+    command: ["all"]
+    depends_on:
+      kafka:
+        condition: service_healthy
+      iceberg-rest:
+        condition: service_started
+
+volumes:
+  iceberg-catalog:
