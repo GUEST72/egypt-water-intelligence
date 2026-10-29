@@ -2,9 +2,23 @@
 
 Amr AbdEl-Monem owns PySpark batch transformation and analytical Iceberg storage. Amr Yousri owns Airflow and shared Compose infrastructure. Start with [Amr AbdEl-Monem's handoff](../AMR_ABDEL_MONEM_HANDOFF.md) for a simple development and validation workflow using only MinIO, the catalog database, Trino and disposable Spark containers. Integrate with Airflow after the standalone jobs pass. The [orchestration runbook](../ORCHESTRATION.md) covers scheduling, monitoring and retries.
 
-The integrated stack now includes Spark, a persistent JDBC Iceberg catalog and Trino. `batch/jobs/handoff_smoke.py` proves that real raw objects can be read and a Spark-written Iceberg record can be queried through Trino. It does not implement the analytical tables described here.
+The integrated stack includes Spark, a persistent JDBC Iceberg catalog and Trino. `batch/jobs/handoff_smoke.py` checks raw-object access and Spark/Iceberg connectivity. It is not the analytical transformation job.
 
-The standalone starter `batch/jobs/build_batch.py` implements reference tables, cleaned events, rejected-delivery evidence, quality counts and a coverage-aware fifteen-minute balance. `validate_batch.py` checks those saved outputs through Spark and Trino; `test_batch.py` provides small fixtures. These jobs can run without Airflow, Kafka or Flink and are not yet registered in the DAG. Daily facts and further analytical requirements below remain work to extend the starter.
+The standalone `batch/jobs/build_batch.py` implements reference tables, cleaned events, rejected-delivery evidence, quality counts, a coverage-aware fifteen-minute balance, dimensions, facts and a daily UTC water balance. `validate_batch.py` checks saved outputs through Spark and Trino. These jobs can run without Airflow, Kafka or Flink and are not yet registered in the DAG.
+
+## Batch boundary, incremental runs and retries
+
+The current source contract publishes each generated `run_id` as a completed, immutable batch with complete reference and delivery files. Treat that run as the processing unit:
+
+- The job fetches and fingerprints only that run's marker, manifest, validation report, reference files and two delivery files. It does not list or scan the raw bucket or read prior Silver/Gold rows to construct a new run.
+- Each output is keyed and overwritten by `run_id`. Different runs remain isolated in Silver and Gold. Gold daily figures are per-run results; they are not cumulative totals across different runs.
+- The daily balance combines volume sums and period counts from the selected run. Percentages are derived from those totals, not by averaging per-period or per-run percentages. No average is combined across batches.
+- `analytics.batch_manifest` records each run's source fingerprint and `processing`/`completed` state. The state changes to completed only after all output tables have been written. The validator requires a completed record matching the current source fingerprint.
+- Retrying a failed or in-progress run overwrites only that run's partitions. A run whose fingerprint is already completed is skipped. Changed source objects fail closed; use `--reprocess` to intentionally recompute and replace that run's outputs.
+
+Iceberg commits each table separately, not as one multi-table transaction. If a job fails partway through, its manifest remains `processing`; consumers should use only runs marked `completed`, and the same run can safely be retried. Serialize builds for the same run ID; this job does not provide a distributed lock for concurrent writers. Do not treat the quality report alone as the completion marker.
+
+This is incremental at the generated-run boundary, not a row-level Kafka-offset checkpoint. If a future source appends data into an existing run, add an explicit delta identity/offset contract and update the impacted aggregation groups from the necessary Silver rows; do not append another copy of a run's complete totals.
 
 ## Source contract
 
@@ -47,7 +61,7 @@ Keep the raw objects immutable. Make the stages and their evidence inspectable:
 3. Deduplicate within each run and record duplicate counts. Define how conflicting copies are resolved.
 4. Join reference entities only where useful. Validate meter/district membership and expected join cardinality.
 5. Aggregate to aligned intervals, then derive historical indicators.
-6. Write Iceberg tables with documented grains, keys, partitions and safe rerun behavior. Read the outputs back using Spark and Trino.
+6. Write Iceberg tables with documented grains, keys, partitions and safe rerun behavior. Read the outputs back using Spark and Trino. For current complete-run inputs, replace the selected run's outputs; for a future append-only source, add a source checkpoint and merge/recompute affected groups instead.
 
 ## Water balance and table grains
 
@@ -75,6 +89,7 @@ Supply the job entrypoint, environment requirements, input/output schemas, table
 - valid reference relationships and interval boundaries;
 - aligned volumes and explicit missing-data coverage;
 - stable counts after retrying or reprocessing the same run;
+- a matching `completed` batch-manifest row after all writes; interrupted runs remain non-consumable until retried successfully;
 - successful queries of the saved Iceberg tables through Spark and Trino.
 
 Keep scenario/fault truth out of the detection and transformation inputs. Evaluation may read restricted truth after the output is produced. Hand-crafted tests must be labeled as such; they are not evidence that every fault occurred in a particular generated run.

@@ -201,7 +201,7 @@ def check_star_schema(tables):
 
 
 def validate(spark, run_id, namespace, gold_namespace="gold"):
-    _, _, manifest = source_manifest(run_id)
+    _, _, manifest, source_fingerprint = source_manifest(run_id)
     tables, summaries = {}, {}
     try:
         for name in TABLES:
@@ -210,12 +210,25 @@ def validate(spark, run_id, namespace, gold_namespace="gold"):
             tables[name] = spark.table(table).filter(F.col("run_id") == run_id).persist(StorageLevel.DISK_ONLY)
             if name in TABLE_KEYS:
                 unique(tables[name], ["run_id"] + TABLE_KEYS[name], name)
+            checksum_columns = sorted(
+                column for column in tables[name].columns
+                if not (name == "batch_manifest" and column == "updated_at_utc")
+            )
             summary = tables[name].agg(F.count("*").alias("records"),
-                F.sum(F.xxhash64(*sorted(tables[name].columns)).cast("decimal(38,0)")).alias("checksum")).first()
+                F.sum(F.xxhash64(*checksum_columns).cast("decimal(38,0)")).alias("checksum")).first()
             summaries[name] = {"records": summary.records, "checksum": str(summary.checksum)}
             require(trino_query("SELECT count(*) FROM " + table + " WHERE run_id = '" + run_id + "'") == [[summary.records]],
                     "Trino/Spark count mismatch: " + name)
         require(summaries["districts"]["records"] > 0 and summaries["meters"]["records"] > 0, "Reference tables are empty")
+        batch = tables["batch_manifest"].first()
+        require(
+            batch is not None
+            and batch.status == "completed"
+            and batch.source_fingerprint == source_fingerprint
+            and batch.namespace == namespace
+            and batch.gold_namespace == gold_namespace,
+            "Batch manifest is not completed for the current source objects",
+        )
         require(not tables["meters"].join(tables["districts"], ["run_id", "district_id"], "left_anti").take(1), "Unknown meter district")
         for stream in ("district", "meter"):
             check_clean(tables[stream + "_clean"], tables["districts" if stream == "district" else "meters"], stream)

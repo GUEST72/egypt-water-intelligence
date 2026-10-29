@@ -1,9 +1,11 @@
-"""Small standalone batch job: MinIO NDJSON -> cleaned Iceberg tables.
+"""Incremental batch job: one completed MinIO run -> cleaned Iceberg tables.
 
 Reject invalid rows before deduplication. Identical valid deliveries collapse;
-conflicting valid copies of an event stop the build. Writes replace one run only.
+conflicting valid copies of an event stop the build. Each run is an immutable
+batch boundary; reruns replace only that run and record completion last.
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -15,6 +17,7 @@ from pyspark.sql import functions as F
 
 from handoff_smoke import read_json, spark_session
 
+PIPELINE_VERSION = "2"
 COMMON = """schema_version string, event_id string, run_id string, district_id string,
     interval_start_utc string, interval_end_utc string, event_time_utc string,
     availability_time_utc string, quality_code string"""
@@ -43,6 +46,7 @@ TABLE_KEYS = {
     "fact_meter_consumption_15m": ["meter_id", "interval_start_utc"],
     "gold_district_daily_water_balance": ["district_id", "date_utc"],
     "quality_report": ["stream"],
+    "batch_manifest": [],
 }
 GOLD_TABLES = (
     "dim_district", "dim_meter", "dim_interval",
@@ -53,11 +57,17 @@ TABLES = tuple(name for name in TABLE_KEYS if name not in GOLD_TABLES) + ("rejec
 TIMES = ("interval_start_utc", "interval_end_utc", "event_time_utc", "availability_time_utc")
 
 
-def arguments(description):
+def arguments(description, include_reprocess=False):
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--namespace", default="analytics", help="Silver and quality namespace in catalog water")
     parser.add_argument("--gold-namespace", default="gold", help="Gold star-schema namespace in catalog water")
+    if include_reprocess:
+        parser.add_argument(
+            "--reprocess",
+            action="store_true",
+            help="rebuild this complete run even if its source fingerprint is unchanged",
+        )
     args = parser.parse_args()
     if not re.fullmatch(r"run-[0-9a-f]{16}", args.run_id):
         parser.error("--run-id must be run- followed by 16 lowercase hex digits")
@@ -67,17 +77,46 @@ def arguments(description):
     return args
 
 
+def source_fingerprint(client, bucket, run_id):
+    source_keys = (
+        run_id + "/_RUN_COMPLETE",
+        run_id + "/artifacts/run-manifest.json",
+        run_id + "/artifacts/validation-report.json",
+        run_id + "/artifacts/districts.ndjson",
+        run_id + "/artifacts/meters.ndjson",
+        run_id + "/delivery/district-sensors.ndjson",
+        run_id + "/delivery/meter-readings.ndjson",
+    )
+    objects = []
+    for key in source_keys:
+        info = client.stat_object(bucket, key)
+        objects.append({
+            "key": key,
+            "etag": info.etag,
+            "size": info.size,
+            "last_modified": info.last_modified.isoformat(),
+            "version_id": info.version_id,
+        })
+
+    fingerprint_data = json.dumps(
+        {"pipeline_version": PIPELINE_VERSION, "objects": objects},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(fingerprint_data).hexdigest()
+
+
 def source_manifest(run_id):
     from minio import Minio
     client = Minio(os.environ["MINIO_ENDPOINT"], access_key=os.environ["MINIO_ACCESS_KEY"],
                    secret_key=os.environ["MINIO_SECRET_KEY"], secure=False)
     bucket = os.environ["MINIO_RAW_BUCKET"]
-    client.stat_object(bucket, run_id + "/_RUN_COMPLETE")
+    fingerprint = source_fingerprint(client, bucket, run_id)
     manifest = read_json(client, bucket, run_id + "/artifacts/run-manifest.json")
     report = read_json(client, bucket, run_id + "/artifacts/validation-report.json")
     if manifest.get("run_id") != run_id or manifest.get("status") != "complete" or report.get("status") != "passed":
         raise ValueError("Selected raw run is incomplete or failed generation validation")
-    return client, bucket, manifest
+    return client, bucket, manifest, fingerprint
 
 
 def require(condition, message):
@@ -249,68 +288,132 @@ def write_run(frame, table, run_id):
         frame.writeTo(table).overwrite(F.col("run_id") == run_id)
 
 
-def build(spark, run_id, namespace, gold_namespace="gold"):
-    client, bucket, manifest = source_manifest(run_id)
-    with TemporaryDirectory(prefix="water-batch-") as folder:
-        refs, raw = {}, {}
-        for stream, filename in (("district", "districts"), ("meter", "meters")):
-            path = Path(folder) / (filename + ".ndjson")
-            client.fget_object(bucket, run_id + "/artifacts/" + path.name, str(path))
-            refs[stream] = spark.read.schema(REFERENCE_SCHEMAS[stream]).option("mode", "FAILFAST").json(str(path)).withColumn("run_id", F.lit(run_id))
-            unique(refs[stream], ["run_id", stream + "_id"], filename)
-        require(not refs["meter"].join(refs["district"], ["run_id", "district_id"], "left_anti").take(1), "Unknown district in meter reference")
-        for stream, filename in (("district", "district-sensors"), ("meter", "meter-readings")):
-            path = Path(folder) / (filename + ".ndjson")
-            client.fget_object(bucket, run_id + "/delivery/" + path.name, str(path))
-            raw[stream] = read_events(spark, path, stream)
-        bounds = raw["district"].select(F.min(F.to_timestamp("interval_start_utc").cast("long")),
-                                            F.max(F.to_timestamp("interval_end_utc").cast("long"))).first()
-        start, end = bounds
-        require(start is not None and end is not None and start % 900 == end % 900 == 0,
-                "District input must span complete UTC fifteen-minute intervals")
-        require(end - start == manifest["logical_interval_count"] * 60, "Input time range differs from manifest")
-        cleaned, rejects, counts, cached = {}, [], [], []
-        for stream in ("district", "meter"):
-            clean, rejected, count, cache = clean_events(raw[stream], refs[stream], stream, run_id)
-            require(count[2] == manifest["delivery_" + stream + "_records"], "Raw count differs from manifest: " + stream)
-            cleaned[stream] = clean
-            rejects.append(rejected)
-            counts.append(count)
-            cached.extend([clean, cache])
-        balance = water_balance(
-            cleaned["district"], cleaned["meter"], refs["district"], refs["meter"], start, end
+def write_batch_manifest(spark, table, run_id, fingerprint, namespace, gold_namespace, status):
+    row = spark.createDataFrame(
+        [(run_id, fingerprint, namespace, gold_namespace, status, PIPELINE_VERSION)],
+        "run_id string, source_fingerprint string, namespace string, gold_namespace string, status string, pipeline_version string",
+    ).withColumn("updated_at_utc", F.current_timestamp())
+    write_run(row, table, run_id)
+
+
+def build(spark, run_id, namespace, gold_namespace="gold", reprocess=False):
+    client, bucket, manifest, fingerprint = source_manifest(run_id)
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + namespace)
+    spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + gold_namespace)
+    batch_manifest_table = "water." + namespace + ".batch_manifest"
+    if not spark.catalog.tableExists(batch_manifest_table):
+        empty_manifest = spark.createDataFrame(
+            [],
+            "run_id string, source_fingerprint string, namespace string, gold_namespace string, status string, pipeline_version string, updated_at_utc timestamp",
         )
-        gold = dimensional_outputs(refs["district"], refs["meter"], cleaned["meter"], balance)
-        outputs = {
-            "districts": refs["district"], "meters": refs["meter"],
-            "district_clean": cleaned["district"], "meter_clean": cleaned["meter"],
-            "rejected_events": rejects[0].unionByName(rejects[1]),
-            "water_balance_15m": balance,
-            **gold,
-            # Written last: evidence that all preceding table writes finished.
-            "quality_report": spark.createDataFrame(counts, "run_id string, stream string, raw_records long, accepted_records long, rejected_records long, duplicate_records long"),
-        }
-        spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + namespace)
-        spark.sql("CREATE NAMESPACE IF NOT EXISTS water." + gold_namespace)
-        for name, frame in outputs.items():
-            if name == "quality_report":
-                continue
-            target_namespace = gold_namespace if name in GOLD_TABLES else namespace
-            write_run(frame, "water." + target_namespace + "." + name, run_id)
-        # The quality report is written last as the completion marker for the whole run.
-        write_run(outputs["quality_report"], "water." + namespace + ".quality_report", run_id)
-        for cache in cached:
-            cache.unpersist()
-    return {"run_id": run_id, "namespace": namespace, "gold_namespace": gold_namespace, "counts": [dict(zip(
-        ["run_id", "stream", "raw_records", "accepted_records", "rejected_records", "duplicate_records"], row)) for row in counts]}
+        empty_manifest.writeTo(batch_manifest_table).using("iceberg").partitionedBy("run_id").tableProperty(
+            "format-version", "2"
+        ).create()
+    previous = (
+        spark.table(batch_manifest_table)
+        .filter(F.col("run_id") == run_id)
+        .select("source_fingerprint", "namespace", "gold_namespace", "status")
+        .first()
+    )
+    if previous and previous.status == "completed":
+        if (
+            previous.source_fingerprint == fingerprint
+            and previous.namespace == namespace
+            and previous.gold_namespace == gold_namespace
+            and not reprocess
+        ):
+            return {
+                "run_id": run_id,
+                "namespace": namespace,
+                "gold_namespace": gold_namespace,
+                "status": "skipped",
+                "reason": "source fingerprint already completed",
+            }
+        if not reprocess:
+            raise ValueError(
+                "Source objects or output namespace changed after this run was processed; "
+                "rerun with --reprocess to replace its outputs"
+            )
+
+    write_batch_manifest(
+        spark, batch_manifest_table, run_id, fingerprint, namespace, gold_namespace, "processing"
+    )
+    with TemporaryDirectory(prefix="water-batch-") as folder:
+        cached = []
+        try:
+            refs, raw = {}, {}
+            for stream, filename in (("district", "districts"), ("meter", "meters")):
+                path = Path(folder) / (filename + ".ndjson")
+                client.fget_object(bucket, run_id + "/artifacts/" + path.name, str(path))
+                refs[stream] = spark.read.schema(REFERENCE_SCHEMAS[stream]).option("mode", "FAILFAST").json(str(path)).withColumn("run_id", F.lit(run_id))
+                unique(refs[stream], ["run_id", stream + "_id"], filename)
+            require(not refs["meter"].join(refs["district"], ["run_id", "district_id"], "left_anti").take(1), "Unknown district in meter reference")
+            for stream, filename in (("district", "district-sensors"), ("meter", "meter-readings")):
+                path = Path(folder) / (filename + ".ndjson")
+                client.fget_object(bucket, run_id + "/delivery/" + path.name, str(path))
+                raw[stream] = read_events(spark, path, stream)
+            bounds = raw["district"].select(F.min(F.to_timestamp("interval_start_utc").cast("long")),
+                                                F.max(F.to_timestamp("interval_end_utc").cast("long"))).first()
+            start, end = bounds
+            require(start is not None and end is not None and start % 900 == end % 900 == 0,
+                    "District input must span complete UTC fifteen-minute intervals")
+            require(end - start == manifest["logical_interval_count"] * 60, "Input time range differs from manifest")
+            cleaned, rejects, counts = {}, [], []
+            for stream in ("district", "meter"):
+                clean, rejected, count, cache = clean_events(raw[stream], refs[stream], stream, run_id)
+                require(count[2] == manifest["delivery_" + stream + "_records"], "Raw count differs from manifest: " + stream)
+                cleaned[stream] = clean
+                rejects.append(rejected)
+                counts.append(count)
+                cached.extend([clean, cache])
+            balance = water_balance(
+                cleaned["district"], cleaned["meter"], refs["district"], refs["meter"], start, end
+            )
+            gold = dimensional_outputs(refs["district"], refs["meter"], cleaned["meter"], balance)
+            outputs = {
+                "districts": refs["district"], "meters": refs["meter"],
+                "district_clean": cleaned["district"], "meter_clean": cleaned["meter"],
+                "rejected_events": rejects[0].unionByName(rejects[1]),
+                "water_balance_15m": balance,
+                **gold,
+                "quality_report": spark.createDataFrame(counts, "run_id string, stream string, raw_records long, accepted_records long, rejected_records long, duplicate_records long"),
+            }
+            for name, frame in outputs.items():
+                if name == "quality_report":
+                    continue
+                target_namespace = gold_namespace if name in GOLD_TABLES else namespace
+                write_run(frame, "water." + target_namespace + "." + name, run_id)
+            write_run(outputs["quality_report"], "water." + namespace + ".quality_report", run_id)
+        finally:
+            for frame in cached:
+                frame.unpersist()
+    require(
+        source_fingerprint(client, bucket, run_id) == fingerprint,
+        "Source objects changed during processing; batch remains processing and must be retried",
+    )
+    write_batch_manifest(
+        spark, batch_manifest_table, run_id, fingerprint, namespace, gold_namespace, "completed"
+    )
+    return {
+        "run_id": run_id,
+        "namespace": namespace,
+        "gold_namespace": gold_namespace,
+        "status": "completed",
+        "source_fingerprint": fingerprint,
+        "counts": [dict(zip(
+            ["run_id", "stream", "raw_records", "accepted_records", "rejected_records", "duplicate_records"], row
+        )) for row in counts],
+    }
 
 
 def main():
-    args = arguments(__doc__)
+    args = arguments(__doc__, include_reprocess=True)
     spark = spark_session()
     spark.sparkContext.setLogLevel("WARN")
     try:
-        print(json.dumps(build(spark, args.run_id, args.namespace, args.gold_namespace), sort_keys=True))
+        print(json.dumps(build(
+            spark, args.run_id, args.namespace, args.gold_namespace, args.reprocess
+        ), sort_keys=True))
     finally:
         spark.stop()
 

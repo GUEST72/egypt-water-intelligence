@@ -6,9 +6,8 @@ Your work is to turn generated measurements into cleaned data, dimensions, facts
 
 | Location | Your work |
 | --- | --- |
-| `batch/jobs/build_batch.py` | Working starter: download raw inputs, clean/deduplicate events, write references and a fifteen-minute water balance. Extend this job for your analytical requirements. |
-| `batch/jobs/validate_batch.py` | Check saved tables, input accounting, reference keys, interval coverage, balance calculations and Trino read-back. |
-| `batch/jobs/test_batch.py` | Small fixture tests for cleaning, duplicates, missing coverage and validation failures. |
+| `batch/jobs/build_batch.py` | Process one completed MinIO run, clean/deduplicate events, write Silver and Gold Iceberg tables, and track the source fingerprint and completion status. |
+| `batch/jobs/validate_batch.py` | Check saved tables, input accounting, reference keys, interval coverage, balance calculations, batch completion and Trino read-back. |
 | `batch/jobs/handoff_smoke.py` | Use `spark_session()` as the working Spark/Iceberg connection example and its reader as a MinIO example. Keep this infrastructure check available. |
 | `batch/Dockerfile` | Add batch dependencies if needed. It copies `batch/jobs/` into the image. |
 | `Generator/schemas/` | Read `meter-reading.v1.json` and `district-sensor.v1.json` for the actual event fields. |
@@ -61,7 +60,7 @@ Expected: Spark exits successfully and Trino returns one row with `216000` and `
 
 ## 4. Run and extend the starter
 
-`build_batch.py` accepts `--run-id` and writes to `water.analytics` by default. Both scripts accept `--namespace amr_dev` to use separate development tables. They use explicit schemas, UTC timestamps and the existing Spark connection settings. Each write replaces only the selected run's rows.
+`build_batch.py` accepts `--run-id` and writes to `water.analytics` and `water.gold` by default. Both scripts accept `--namespace amr_dev` to use separate development tables. The build job fingerprints only the selected run's source objects, writes a `batch_manifest` status, and replaces only that run's rows. A completed unchanged run is skipped; use `--reprocess` to explicitly recompute it. A changed source fingerprint is rejected unless `--reprocess` is supplied.
 
 | Table | One row represents |
 | --- | --- |
@@ -69,13 +68,16 @@ Expected: Spark exits successfully and Trino returns one row with `216000` and `
 | `district_clean` / `meter_clean` | One accepted event per run and event ID |
 | `rejected_events` | One rejected delivery, including raw JSON and reasons |
 | `quality_report` | Input, accepted, rejected and duplicate counts for one stream/run |
+| `batch_manifest` | One run's source fingerprint, target namespaces, pipeline version and `processing`/`completed` state |
 | `water_balance_15m` | One district and UTC fifteen-minute interval, with coverage counts |
 
-The starter rejects malformed records, unknown references, invalid times, non-finite/negative measures, null required measures and quality codes other than `valid`/`noisy`. A null pressure rejects the district event, so that minute is missing from balance coverage. Identical accepted deliveries collapse; conflicting accepted copies of an event fail the build. Rejected deliveries are counted before deduplication. Incomplete intervals have a null gap; complete intervals with zero inlet have a null gap percentage. Extend these explicit policies as needed.
+The job reads one complete `run_id` batch at a time; it does not scan the raw bucket or reread old Silver/Gold rows. Separate runs remain separate partitions, and daily Gold values are per-run, not cumulative across runs. Sums and period counts are retained for daily results; percentages are calculated from those totals, never by averaging batch averages. This is not a Kafka-offset/row-level delta reader: if a source changes inside an existing run, the selected run is recomputed as a whole with `--reprocess`.
+
+The starter rejects malformed records, unknown references, invalid times, non-finite/negative measures, null required measures and quality codes other than `valid`/`noisy`. A null pressure rejects the district event, so that minute is missing from balance coverage. Identical accepted deliveries collapse; conflicting accepted copies of an event fail the build. Rejected deliveries are counted before deduplication. Incomplete intervals have a null gap; complete intervals with zero inlet have a null gap percentage.
 
 For the pilot ID above, this policy produces 215,957 clean district events and 1,439,943 clean meter events, with 43 rejected district deliveries and 114 rejected meter deliveries. The duplicated null meter readings are rejected too, so the valid-duplicate counter is zero for this dataset.
 
-This is a starting point: daily facts, business-specific indicators and alert consolidation still need your implementation. Writes to different tables are sequential, so rerun the build after a partial failure and require a successful validator before using the outputs.
+Iceberg commits each table separately, not as one multi-table transaction. If a build fails partway through, `batch_manifest` remains `processing`; consumers must use only runs marked `completed`. Retrying the same run overwrites its output partitions, and the manifest is marked completed only after all tables are written. Run only one build per `run_id` at a time; the standalone job does not provide a distributed lock. Always run the validator before relying on output.
 
 For raw ingestion, a first implementation can download selected objects with the MinIO SDK into a temporary directory and read those files with Spark. This works with the current single-container runtime. Iceberg's S3FileIO settings alone do **not** enable `spark.read.json('s3a://…')`; distributed raw reads need a tested S3A connector or another staging strategy.
 
@@ -85,20 +87,16 @@ Run the starter, then repeat this loop after edits:
 # Rebuild after edits: job files are copied into the image.
 docker compose build spark
 docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/build_batch.py --run-id run-4fae7f16e89b947e
+
+# An unchanged completed batch is skipped; explicitly rebuild it when needed:
+docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/build_batch.py --run-id run-4fae7f16e89b947e --reprocess
 ```
 
 The entrypoint already runs `spark-submit`; pass only the script and arguments. Your input comes from MinIO, so there is no need to regenerate data, publish Kafka messages or trigger Airflow after each edit.
 
 ## 5. Test and validate your results
 
-Run the included `unittest` fixtures after edits. They cover valid data, duplicates, conflicting copies, null/non-finite measurements, invalid references/timestamps, malformed JSON, a foreign run, missing coverage and a hand-calculated balance. They also deliberately corrupt a balance to check that validation fails. No running storage services are needed for these tests:
-
-```bash
-docker compose build spark
-docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/test_batch.py
-```
-
-Then run `validate_batch.py` against the saved tables. It exits with an error if a check fails. Keep these requirements covered as you extend the job:
+Run `validate_batch.py` against the saved tables. It exits with an error if a check fails, including if the current source fingerprint is not marked completed. Keep these requirements covered as you extend the job:
 
 | Check | Passing result |
 | --- | --- |
