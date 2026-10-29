@@ -98,7 +98,7 @@ def replay_to_kafka(
     to ``1 / speed`` wall-clock seconds. Delivery is at-least-once.
     """
     try:
-        from kafka import KafkaProducer
+        from kafka import KafkaProducer # type: ignore
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("install the generator with the kafka extra") from exc
 

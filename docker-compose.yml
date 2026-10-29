@@ -1,3 +1,30 @@
+name: egypt-water-intelligence
+
+# Persistent services start with `docker compose up -d`.
+# Finite commands (profile "tools") run with `docker compose run --rm <service> ...`.
+# Every ${VAR:-default} can be overridden in .env (see .env.example).
+
+x-minio-env: &minio-env
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
+  MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
+  MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
+  MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+  MINIO_WAREHOUSE_BUCKET: ${MINIO_WAREHOUSE_BUCKET:-water-warehouse}
+
+x-flink-properties: &flink-properties |
+  jobmanager.rpc.address: flink-jobmanager
+  jobmanager.memory.process.size: 1024m
+  taskmanager.numberOfTaskSlots: 4
+  taskmanager.memory.process.size: 2g
+  parallelism.default: 2
+  state.backend.type: hashmap
+  state.checkpoints.dir: file:///opt/flink/state/checkpoints
+  state.savepoints.dir: file:///opt/flink/state/savepoints
+  execution.checkpointing.interval: 30 s
+  execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+
 services:
   kafka:
     image: apache/kafka:3.7.1
@@ -5,21 +32,26 @@ services:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: controller,broker
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,EXTERNAL:PLAINTEXT
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      # kafka:9092 for containers; localhost:29092 for host tools (Dagster).
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,EXTERNAL://localhost:29092
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
       CLUSTER_ID: water-intelligence-kraft
     volumes:
       - kafka-data:/tmp/kraft-combined-logs
+    ports:
+      - "29092:29092"
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 12
 
   minio:
@@ -52,16 +84,12 @@ services:
       - "8080:8080"
 
   init:
+    image: egypt-water-intelligence/generator:local
     build:
       context: ./Generator
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
-      MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
-      MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
-      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+      <<: *minio-env
     depends_on:
       kafka:
         condition: service_healthy
@@ -71,16 +99,13 @@ services:
     command: ["scripts/init_services.py"]
 
   generator:
+    image: egypt-water-intelligence/generator:local
     build:
       context: ./Generator
+    profiles: ["tools"]
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
-      MINIO_RAW_BUCKET: ${MINIO_RAW_BUCKET:-water-raw}
-      MINIO_RESTRICTED_BUCKET: ${MINIO_RESTRICTED_BUCKET:-water-restricted}
-      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+      <<: *minio-env
     depends_on:
       kafka:
         condition: service_healthy
@@ -90,17 +115,18 @@ services:
         condition: service_completed_successfully
     volumes:
       - ./Generator/output:/app/output
+      # Pipeline dataset configs live outside Generator/ (see configs/).
+      - ./configs:/app/pipeline-configs:ro
     command: ["--help"]
 
   archiver:
+    image: egypt-water-intelligence/generator:local
     build:
       context: ./Generator
+    restart: unless-stopped
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-wateradmin}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-wateradminsecret}
-      MINIO_EVENT_BUCKET: ${MINIO_EVENT_BUCKET:-water-events}
+      <<: *minio-env
     depends_on:
       kafka:
         condition: service_healthy
@@ -110,6 +136,138 @@ services:
         condition: service_completed_successfully
     command: ["archive-kafka", "--bucket", "${MINIO_EVENT_BUCKET:-water-events}"]
 
+  flink-jobmanager:
+    image: egypt-water-intelligence/flink:local
+    build: ./flink
+    command: jobmanager
+    ports:
+      - "8081:8081"
+    environment:
+      FLINK_PROPERTIES: *flink-properties
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs
+      - flink-state:/opt/flink/state
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+  flink-taskmanager:
+    image: egypt-water-intelligence/flink:local
+    build: ./flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: *flink-properties
+    volumes:
+      - ./flink/jobs:/opt/flink/jobs
+      - flink-state:/opt/flink/state
+    depends_on:
+      - flink-jobmanager
+
+  catalog-db:
+    image: postgres:16.6
+    environment:
+      POSTGRES_DB: iceberg
+      POSTGRES_USER: iceberg
+      POSTGRES_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberg-local}
+    volumes:
+      - catalog-db-data:/var/lib/postgresql/data
+      - ./infrastructure/catalog-db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iceberg -d iceberg"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  trino:
+    image: trinodb/trino:476
+    # The image sizes its heap at 80% of the container limit.
+    mem_limit: 1536m
+    environment:
+      <<: *minio-env
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberg-local}
+    volumes:
+      - ./infrastructure/trino/catalog:/etc/trino/catalog:ro
+    ports:
+      - "8082:8080"
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/lib/trino/bin/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+
+  spark:
+    image: egypt-water-intelligence/spark:local
+    build: ./batch
+    profiles: ["tools"]
+    environment:
+      <<: *minio-env
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberg-local}
+      # Iceberg S3FileIO (AWS SDK v2) requires a region even for MinIO.
+      AWS_REGION: us-east-1
+    volumes:
+      - spark-events:/opt/spark/spark-events
+      - ./dashboards/data:/opt/spark/dashboard-data   # Parquet exports for Power BI
+    ports:
+      # Live Spark UI while a job runs (needs `docker compose run --service-ports`).
+      - "4040:4040"
+    depends_on:
+      catalog-db:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  spark-history:
+    image: egypt-water-intelligence/spark:local
+    build: ./batch
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
+    command: []
+    volumes:
+      - spark-events:/opt/spark/spark-events
+    ports:
+      - "18080:18080"
+
+  # Live serving path: Flink's Kafka outputs -> Postgres schema `live` -> Grafana (refreshes every 5 s).
+  live-bridge:
+    image: egypt-water-intelligence/live-bridge:local
+    build: ./live
+    restart: unless-stopped
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      CATALOG_DB_PASSWORD: ${CATALOG_DB_PASSWORD:-iceberg-local}
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-live}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      catalog-db:
+        condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-wateradmin}
+      GF_AUTH_ANONYMOUS_ENABLED: "true"          # read-only viewing without login (local demo)
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/live-operations.json
+      GRAFANA_DB_PASSWORD: ${GRAFANA_DB_PASSWORD:-grafana-live}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - live-bridge
+
 volumes:
   kafka-data:
   minio-data:
+  flink-state:
+  catalog-db-data:
+  spark-events:
+  grafana-data:

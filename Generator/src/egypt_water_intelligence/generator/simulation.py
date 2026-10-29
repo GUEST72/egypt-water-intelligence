@@ -9,9 +9,9 @@ from tempfile import TemporaryDirectory
 from typing import Any
 from zoneinfo import ZoneInfo
 
-import numpy as np
-import wntr
-from wntr.network.controls import Control, ControlAction, SimTimeCondition
+import numpy as np # type: ignore
+import wntr # type: ignore
+from wntr.network.controls import Control, ControlAction, SimTimeCondition # type: ignore
 
 from .config import RunConfig
 

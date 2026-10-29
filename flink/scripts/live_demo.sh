@@ -8,7 +8,7 @@
 source "$(dirname "$0")/common.sh"
 SPEED=0
 if [ "${1:-}" = "--speed" ]; then SPEED=${2:-0}; fi
-RUN_DIR=${RUN_DIR:-/app/output/run-bdc85c43085c4dc8}
+RUN_DIR=${RUN_DIR:-/app/output/run-72b96af88a342375}
 METER_TOPIC=water.meter-readings.v1
 GID=$(date +%s)
 

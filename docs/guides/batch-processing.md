@@ -1,0 +1,95 @@
+# Batch processing guide: raw data to analytical tables
+
+Amr AbdEl-Monem owns PySpark batch transformation and analytical Iceberg storage. The jobs run in the `spark` Compose service and are orchestrated by Dagster (assets `batch_silver_gold` and `batch_validation`). How the batch path works and every change made to it are explained in [5. Batch path](../05-batch.md).
+
+The integrated stack includes Spark, a persistent JDBC Iceberg catalog and Trino. `batch/jobs/handoff_smoke.py` checks raw-object access and Spark/Iceberg connectivity. It is not the analytical transformation job.
+
+The standalone `batch/jobs/build_batch.py` implements reference tables, cleaned events, rejected-delivery evidence, quality counts, a coverage-aware fifteen-minute balance, dimensions, facts and a daily UTC water balance. `validate_batch.py` checks saved outputs through Spark and Trino. They can also be run directly: `docker compose run --rm --no-deps spark /opt/spark/work-dir/jobs/build_batch.py --run-id <run>`.
+
+## Batch boundary, incremental runs and retries
+
+The current source contract publishes each generated `run_id` as a completed, immutable batch with complete reference and delivery files. Treat that run as the processing unit:
+
+- The job fetches and fingerprints only that run's marker, manifest, validation report, reference files, its archive manifest and the archive files it lists. It does not list or scan the raw bucket or read prior Silver/Gold rows to construct a new run.
+- Each output is keyed and overwritten by `run_id`. Different runs remain isolated in Silver and Gold. Gold daily figures are per-run results; they are not cumulative totals across different runs.
+- The daily balance combines volume sums and period counts from the selected run. Percentages are derived from those totals, not by averaging per-period or per-run percentages. No average is combined across batches.
+- `analytics.batch_manifest` records each run's source fingerprint and `processing`/`completed` state. The state changes to completed only after all output tables have been written. The validator requires a completed record matching the current source fingerprint.
+- Retrying a failed or in-progress run overwrites only that run's partitions. A run whose fingerprint is already completed is skipped. Changed source objects fail closed; use `--reprocess` to intentionally recompute and replace that run's outputs.
+
+Iceberg commits each table separately, not as one multi-table transaction. If a job fails partway through, its manifest remains `processing`; consumers should use only runs marked `completed`, and the same run can safely be retried. Serialize builds for the same run ID; this job does not provide a distributed lock for concurrent writers. Do not treat the quality report alone as the completion marker.
+
+This is incremental at the generated-run boundary, not a row-level Kafka-offset checkpoint. If a future source appends data into an existing run, add an explicit delta identity/offset contract and update the impacted aggregation groups from the necessary Silver rows; do not append another copy of a run's complete totals.
+
+## Source contract
+
+Read a selected, completed generated run from MinIO. Do not depend on a teammate's local `Generator/output/` folder or a historical hardcoded run ID. Require `<run_id>/_RUN_COMPLETE` and use `<run_id>/artifacts/run-manifest.json` to establish the run and expected counts.
+
+The actual raw layout is:
+
+```text
+water-raw/<run_id>/artifacts/districts.ndjson
+water-raw/<run_id>/artifacts/meters.ndjson
+water-raw/<run_id>/artifacts/network.inp
+water-raw/<run_id>/artifacts/run-manifest.json
+water-raw/<run_id>/artifacts/validation-report.json
+water-events/_manifests/<run_id>/archive-manifest.json
+water-events/events/<topic>/<run_id>/part-<partition>-<first>-<last>.ndjson.gz
+```
+
+`water-raw` holds only reference entities and run evidence. Delivery events (including configured faults) reach MinIO only through Kafka and the archiver, as compressed NDJSON in `water-events`; the batch job reads exactly the files listed in the archive manifest, which is written only after the archive is proven complete. Configuration, scenario truth and fault truth go to `water-restricted`, outside transformation inputs.
+
+All measurements use cubic metres, cubic metres per second and metres of water head, as named in the versioned schemas. The generator has meter and district entities; it has no separate customer table, installation date, prepaid flag or district pipe age. Preserve the existing attributes and do not invent missing source data to fill a proposed star schema.
+
+## Event identities and timestamps
+
+Use `Generator/schemas/meter-reading.v1.json` and `Generator/schemas/district-sensor.v1.json` as the event contracts. Delivery copies can violate canonical measurement constraints intentionally: null measurements, corrupt quality codes or duplicate deliveries must have explicit handling.
+
+Both streams carry `schema_version`, `event_id`, `run_id`, `district_id`, interval boundaries, event/availability times and `quality_code`. Keep `run_id` as an isolation boundary and deduplicate by `(run_id, event_id)` with a documented policy for conflicting duplicates.
+
+District events represent one minute; `event_time_utc` equals interval start. Their measures include `inlet_flow_m3_s`, `inlet_volume_m3` and `pressure_m_h2o`.
+
+Meter events represent fifteen minutes; `event_time_utc` equals interval end. `consumed_volume_m3` is the interval's delivered volume, not a cumulative register. `meter_id` identifies the meter.
+
+All timestamps are UTC ISO 8601. Demand calendars use Africa/Cairo, but timestamp parsing and interval joins must retain explicit timezone semantics. Do not equate event time with interval start across both streams.
+
+## Transformation stages
+
+Keep the raw objects immutable. Make the stages and their evidence inspectable:
+
+1. Read NDJSON with explicit schemas and record source counts. If using the Kafka archive, support gzip and retain object/topic/offset lineage.
+2. Validate identifiers, versions, timestamps, interval lengths, non-negative measures and the agreed quality codes. Record rejected rows and reasons; do not silently discard malformed data.
+3. Deduplicate within each run and record duplicate counts. Define how conflicting copies are resolved.
+4. Join reference entities only where useful. Validate meter/district membership and expected join cardinality.
+5. Aggregate to aligned intervals, then derive historical indicators.
+6. Write Iceberg tables with documented grains, keys, partitions and safe rerun behavior. Read the outputs back using Spark and Trino. For current complete-run inputs, replace the selected run's outputs; for a future append-only source, add a source checkpoint and merge/recompute affected groups instead.
+
+## Water balance and table grains
+
+Before creating a table, state what one row represents. The project document proposes meter-period facts, district-minute facts, daily district water balance and alert incidents. Implement only outputs with real inputs and clear ownership. Flink currently owns real-time detection; batch alert consolidation requires an explicit Kafka/Iceberg contract from Ahmed.
+
+For an aligned fifteen-minute district interval:
+
+```text
+district_inlet_volume_m3 = sum(the 15 one-minute inlet_volume_m3 values)
+district_metered_consumption_m3 = sum(meter consumed_volume_m3 for that interval)
+balance_gap_m3 = district_inlet_volume_m3 - district_metered_consumption_m3
+```
+
+A daily balance should derive from consistent intervals and a documented UTC or Cairo calendar. Record missing coverage rather than implying complete totals. The gap is signed evidence, not confirmed leakage; physical losses, delivery faults and operational disturbances can affect it. Define zero-inlet handling before calculating gap percentage.
+
+Reference dimensions can include the actual district and meter attributes. Date/time dimensions are useful only when their calendar semantics and attributes are defined. A junction dimension is optional: the current generator has one service junction per district and no cross-district transfers or storage tanks.
+
+## Acceptance evidence
+
+Supply the job entrypoint, environment requirements, input/output schemas, table grains and repeatable commands. The job and its Trino verification are registered as Dagster assets. Demonstrate:
+
+- source counts reconciled with the delivery counts in the selected run manifest;
+- accepted, rejected and duplicate counts, including intentional test faults;
+- no duplicate canonical event identities after cleaning;
+- valid reference relationships and interval boundaries;
+- aligned volumes and explicit missing-data coverage;
+- stable counts after retrying or reprocessing the same run;
+- a matching `completed` batch-manifest row after all writes; interrupted runs remain non-consumable until retried successfully;
+- successful queries of the saved Iceberg tables through Spark and Trino.
+
+Keep scenario/fault truth out of the detection and transformation inputs. Evaluation may read restricted truth after the output is produced. Hand-crafted tests must be labeled as such; they are not evidence that every fault occurred in a particular generated run.

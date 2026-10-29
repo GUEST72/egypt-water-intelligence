@@ -98,7 +98,7 @@ It does not mean that every real-world complexity is represented. The network is
 
 The current network is intentionally manageable. It has one source, a service junction, district inlets, and optional branches that can represent leaks.
 
-There are six districts in the reference configuration, with 600 meters in total. Each district receives water through its modeled inlet, while meters represent demand-bearing measurement points associated with districts.
+There are six districts in the reference configuration (`configs/pipeline-large.yml`), with 1,500 meters in total, 250 per district. The original pilot (`Generator/configs/pilot.yml`) used 600 meters. Each district receives water through its modeled inlet, while meters represent demand-bearing measurement points associated with districts.
 
 The current model does not represent cross-district transfers or internal district storage. Those are important boundaries because they affect how we interpret water balance. We should not claim to model water movement that the network itself does not contain.
 
@@ -126,7 +126,7 @@ The generator uses a YAML configuration, seeded random behavior where applicable
 
 For the reference run, the identifier is:
 
-`run-bdc85c43085c4dc8`
+`run-72b96af88a342375`
 
 The artifacts for that run are stored together so the dataset can be traced back to its configuration and validation results.
 
@@ -142,11 +142,11 @@ District sensors report once per minute. Across 36,000 one-minute intervals and 
 
 **36,000 × 6 = 216,000 events.**
 
-Meters report once every fifteen minutes. Over 25 days, that gives 2,400 intervals per meter. With 600 meters, the expected public meter stream contains:
+Meters report once every fifteen minutes. Over 25 days, that gives 2,400 intervals per meter. With 1,500 meters, the expected public meter stream contains:
 
-**2,400 × 600 = 1,440,000 events.**
+**2,400 × 1,500 = 3,600,000 events.**
 
-Together, the two clean public streams contain **1,656,000 events**.
+Together, the two clean public streams contain **3,816,000 events**. (The 600-meter pilot produces 1,440,000 meter events and 1,656,000 in total.)
 
 The hydraulic simulation itself has 36,001 snapshots because the initial and terminal simulation states are part of the simulated timeline. That does not mean the event stream should contain 36,001 complete one-minute intervals. The initial state and the 36,000 intervals are different things.
 
@@ -180,11 +180,14 @@ For example, a consumer can compare its results against the clean dataset while 
 
 ## 10. Faults are deliberate, not accidental
 
-The pilot configuration includes three data-quality fault rules:
+The reference configuration includes four data-quality fault rules:
 
 - Meter events can receive null values in `consumed_volume_m3`.
-- District sensor events can receive null values in `pressure_m_h2o`.
 - Meter events can be duplicated.
+- District sensor events can receive null values in `pressure_m_h2o`.
+- District sensor events can be duplicated.
+
+The cadences are different prime numbers, so a record is never both nulled and duplicated: every duplicate is a valid copy, which exercises deduplication downstream. A nulled record also gets `quality_code: corrupted`.
 
 The configured rules are:
 
@@ -192,15 +195,18 @@ The configured rules are:
 faults:
   - stream: meter
     type: null_value
-    every_n: 25000
+    every_n: 4999
     field: consumed_volume_m3
-  - stream: district
-    type: null_value
-    every_n: 5000
-    field: pressure_m_h2o
   - stream: meter
     type: duplicate
-    every_n: 25000
+    every_n: 7919
+  - stream: district
+    type: null_value
+    every_n: 1999
+    field: pressure_m_h2o
+  - stream: district
+    type: duplicate
+    every_n: 3001
 ```
 
 The `every_n` setting describes the configured fault frequency in the relevant stream. These rules should be interpreted as deliberate transformations of the delivery data, not as changes to the underlying hydraulic truth.
@@ -211,13 +217,13 @@ For the configured reference delivery, the expected totals are:
 
 | Stream | Clean public events | Delivery events |
 |---|---:|---:|
-| District sensors | 216,000 | 216,000 |
-| Meter readings | 1,440,000 | 1,440,057 |
-| **Total** | **1,656,000** | **1,656,057** |
+| District sensors | 216,000 | 216,071 |
+| Meter readings | 3,600,000 | 3,600,454 |
+| **Total** | **3,816,000** | **3,816,525** |
 
-The delivery output has 57 additional duplicate records and 100 configured null-value fault records: 57 meter null-value faults and 43 district pressure null-value faults.
+The delivery output has 525 additional duplicate records (71 district, 454 meter) and 828 null-value fault records (720 meter `consumed_volume_m3`, 108 district `pressure_m_h2o`): 1,353 fault audit records in total.
 
-A null value does not necessarily add a record, while a duplicate does. That is why the delivery count increases by 57 rather than by the total number of fault audit records.
+A null value does not add a record, while a duplicate does. That is why the delivery count increases by 525 rather than by the total number of fault audit records.
 
 ## 11. Keep the truth separate from what the pipeline sees
 
@@ -304,7 +310,7 @@ The reference run's validation report for the clean public streams recorded:
 {
   "district_records": 216000,
   "errors": [],
-  "meter_records": 1440000,
+  "meter_records": 3600000,
   "status": "passed"
 }
 ```
@@ -321,31 +327,31 @@ The project is designed to run through Docker Compose, with the generator, Kafka
 
 The reference run directory inside the generator container is:
 
-`/app/output/run-bdc85c43085c4dc8`
+`/app/output/run-72b96af88a342375`
 
 To publish the clean public streams to Kafka:
 
 ```powershell
-docker compose run --rm --no-deps generator publish-kafka --run-dir /app/output/run-bdc85c43085c4dc8 --input-set public --bootstrap-servers kafka:9092 --speed 0
+docker compose run --rm --no-deps generator publish-kafka --run-dir /app/output/run-72b96af88a342375 --input-set public --bootstrap-servers kafka:9092 --speed 0
 ```
 
 To publish the delivery streams with the configured faults:
 
 ```powershell
-docker compose run --rm --no-deps generator publish-kafka --run-dir /app/output/run-bdc85c43085c4dc8 --input-set delivery --bootstrap-servers kafka:9092 --speed 0
+docker compose run --rm --no-deps generator publish-kafka --run-dir /app/output/run-72b96af88a342375 --input-set delivery --bootstrap-servers kafka:9092 --speed 0
 ```
 
 To upload the generated source artifacts and restricted truth to their corresponding MinIO buckets:
 
 ```powershell
-docker compose run --rm generator archive-minio --run-dir /app/output/run-bdc85c43085c4dc8
+docker compose run --rm generator archive-minio --run-dir /app/output/run-72b96af88a342375
 ```
 
 The last command is the direct artifact upload step. It should not be confused with the separate Kafka event archiver.
 
 The host-side reference run is stored under:
 
-`Generator\output\run-bdc85c43085c4dc8`
+`Generator\output\run-72b96af88a342375`
 
 Docker Compose uses named volumes for Kafka and MinIO persistence. A normal `docker compose down` stops the services without deleting those volumes. Using `docker compose down -v` removes the named volumes and therefore deletes the persisted Kafka and MinIO data associated with them.
 

@@ -1,3 +1,18 @@
 flink/scripts/savepoints.log
-analysis/*.csv
+flink/analysis/*.csv
+flink/analysis/*.png
 .venv/
+.env
+orchestration/.venv/
+orchestration/.dagster_home/
+*.egg-info/
+**/__pycache__/
+.pytest_cache/
+
+# Private notes
+*.local.md
+
+# Dashboard material is generated locally and not versioned
+/dashboards/
+infrastructure/grafana/build_dashboard.py
+infrastructure/grafana/dashboards/

@@ -1,0 +1,166 @@
+# Pipeline dataset: the pilot (Generator/configs/pilot.yml) scaled to 1,500 meters.
+#
+# Limits that shape this file (verified in code):
+#   * 25 days is the generator maximum (Generator/.../config.py).
+#   * 6 districts are required by Flink job3b (fixed D001..D006 peer pivot).
+#
+# Scaling rule: district demand grows with meter count (250 per district instead of 100), while
+# emitter leak flow (C * sqrt(pressure)) does not. Every emitter coefficient is the pilot value
+# x 2.5, so each leak keeps the same size relative to district flow.
+#
+# Scenario timing: incidents do not overlap in time (except the long persistent losses, as in
+# the pilot), so the "median of the other five districts" baseline stays clean.
+schema_version: "1.0.0"
+run:
+  seed: 20261029
+  start_time_utc: "2026-01-01T00:00:00Z"
+  duration_minutes: 36000
+  output_root: output
+utility:
+  district_count: 6
+  meter_count: 1500
+  timezone: Africa/Cairo
+demand:
+  customer_classes:
+    residential:
+      share: 0.9
+      baseline_mean_m3_s: 0.0000105
+      baseline_sigma: 0.35
+      profile_multiplier: 1.0
+    small_commercial:
+      share: 0.1
+      baseline_mean_m3_s: 0.000021
+      baseline_sigma: 0.30
+      profile_multiplier: 1.15
+  weekly_multipliers:
+    weekday: 1.0
+    thursday: 1.04
+    friday: 1.0
+    saturday: 0.98
+  friday_prayer:
+    enabled: true
+    start_local: "12:00"
+    end_local: "13:30"
+    residential_multiplier: 0.75
+    small_commercial_multiplier: 0.90
+    rebound_multiplier: 1.05
+    rebound_minutes: 60
+hydraulics:
+  engine: epanet_2_2
+  demand_model: PDD
+  hydraulic_timestep_seconds: 60
+  pattern_timestep_seconds: 60
+  report_timestep_seconds: 60
+  minimum_pressure_m: 5.0
+  required_pressure_m: 20.0
+  pressure_exponent: 0.5
+  source_head_m: 45.0
+  balance_tolerance_m3: 0.0001
+scenarios:
+  # Present from minute 0: invisible to stream comparisons, visible in the batch water balance.
+  - scenario_id: background-loss-d6
+    type: persistent_background_loss
+    district_id: D006
+    start_minute: 0
+    end_minute: 36000
+    emitter_coefficient: 0.000025
+  - scenario_id: burst-d1
+    type: burst
+    district_id: D001
+    start_minute: 1800
+    end_minute: 1920
+    emitter_coefficient: 0.0003
+  - scenario_id: gradual-leak-d2
+    type: gradual_leak
+    district_id: D002
+    start_minute: 3600
+    end_minute: 4320
+    emitter_coefficient: 0.0002
+    stages: 3
+  - scenario_id: supply-disturbance-d3
+    type: supply_disturbance
+    district_id: D003
+    start_minute: 5400
+    end_minute: 5520
+    source_head_delta_m: -30.0
+  - scenario_id: demand-surge-d1
+    type: demand_surge
+    district_id: D001
+    start_minute: 7200
+    end_minute: 7320
+    demand_multiplier: 1.6
+  # Short night-time burst (90 minutes, low demand).
+  - scenario_id: burst-d6
+    type: burst
+    district_id: D006
+    start_minute: 9000
+    end_minute: 9090
+    emitter_coefficient: 0.0003
+  # Milder supply problem in a different district.
+  - scenario_id: supply-disturbance-d2
+    type: supply_disturbance
+    district_id: D002
+    start_minute: 11520
+    end_minute: 11640
+    source_head_delta_m: -25.0
+  # Starts on day 11, after the 6-day baseline that rule R4 needs.
+  - scenario_id: persistent-loss-d5
+    type: persistent_background_loss
+    district_id: D005
+    start_minute: 14400
+    end_minute: 28800
+    emitter_coefficient: 0.00002
+  # Demand surge (meters rise too); paired with burst-d4 in the same district for comparison.
+  - scenario_id: demand-surge-d4
+    type: demand_surge
+    district_id: D004
+    start_minute: 17280
+    end_minute: 17400
+    demand_multiplier: 1.5
+  - scenario_id: burst-d4
+    type: burst
+    district_id: D004
+    start_minute: 21600
+    end_minute: 21720
+    emitter_coefficient: 0.00025
+  # One-day leak growing in four steps.
+  - scenario_id: gradual-leak-d3
+    type: gradual_leak
+    district_id: D003
+    start_minute: 25920
+    end_minute: 27360
+    emitter_coefficient: 0.00025
+    stages: 4
+  # Short 45-minute burst: three 15-minute windows.
+  - scenario_id: burst-d2
+    type: burst
+    district_id: D002
+    start_minute: 31680
+    end_minute: 31725
+    emitter_coefficient: 0.0003
+  - scenario_id: demand-surge-d6
+    type: demand_surge
+    district_id: D006
+    start_minute: 33120
+    end_minute: 33240
+    demand_multiplier: 1.6
+sensor:
+  noise_relative_stddev: 0.0
+
+# Prime cadences so a record is never both nulled and duplicated: duplicates stay valid copies,
+# which exercises deduplication in Flink job2 and in Spark.
+faults:
+  - stream: meter            # 3,600,000 rows -> 720 nulls
+    type: null_value
+    every_n: 4999
+    field: consumed_volume_m3
+  - stream: meter            # -> 454 duplicate copies
+    type: duplicate
+    every_n: 7919
+  - stream: district         # 216,000 rows -> 108 nulls
+    type: null_value
+    every_n: 1999
+    field: pressure_m_h2o
+  - stream: district         # -> 71 duplicate copies
+    type: duplicate
+    every_n: 3001

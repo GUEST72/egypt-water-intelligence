@@ -1,0 +1,15 @@
+apiVersion: 1
+datasources:
+  - name: Live (Postgres)
+    uid: live-pg
+    type: grafana-postgresql-datasource
+    url: catalog-db:5432
+    user: grafana_live          # read-only role created by the live bridge (schema `live` only)
+    isDefault: true
+    jsonData:
+      database: iceberg
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: $GRAFANA_DB_PASSWORD

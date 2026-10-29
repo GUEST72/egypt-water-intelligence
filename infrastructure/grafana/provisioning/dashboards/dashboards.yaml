@@ -1,0 +1,9 @@
+apiVersion: 1
+providers:
+  - name: water
+    folder: Egypt Water Intelligence
+    type: file
+    allowUiUpdates: false
+    updateIntervalSeconds: 10   # poll the folder: file events do not cross Windows bind mounts
+    options:
+      path: /var/lib/grafana/dashboards

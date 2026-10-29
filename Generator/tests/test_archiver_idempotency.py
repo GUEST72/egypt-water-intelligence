@@ -7,7 +7,7 @@ import gzip
 from collections import namedtuple
 from unittest.mock import Mock, patch
 
-from egypt_water_intelligence.generator.archiver import archive_kafka
+from egypt_water_intelligence.generator.archiver import archive_kafka # type: ignore
 
 
 class FakeS3Error(Exception):
@@ -86,21 +86,21 @@ class TestArchiveIdempotency(unittest.TestCase):
         minio = FakeMinio()
 
         kafka_module = types.ModuleType("kafka")
-        kafka_module.KafkaConsumer = lambda *a, **kw: consumer
+        kafka_module.KafkaConsumer = lambda *a, **kw: consumer # type: ignore
 
         kafka_structs = types.ModuleType("kafka.structs")
-        kafka_structs.TopicPartition = namedtuple(
+        kafka_structs.TopicPartition = namedtuple( # type: ignore
             "TopicPartition", ["topic", "partition"]
         )
-        kafka_structs.OffsetAndMetadata = namedtuple(
+        kafka_structs.OffsetAndMetadata = namedtuple( # type: ignore
             "OffsetAndMetadata", ["offset", "metadata"]
         )
 
         minio_module = types.ModuleType("minio")
-        minio_module.Minio = lambda *a, **kw: minio
+        minio_module.Minio = lambda *a, **kw: minio # type: ignore
 
         minio_error = types.ModuleType("minio.error")
-        minio_error.S3Error = FakeS3Error
+        minio_error.S3Error = FakeS3Error # type: ignore
 
         fake_modules = {
             "kafka": kafka_module,

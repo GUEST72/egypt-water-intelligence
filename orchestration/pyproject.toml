@@ -1,0 +1,28 @@
+[project]
+name = "water-orchestration"
+version = "0.1.0"
+description = "Dagster orchestration for the Egypt Water Intelligence pipeline"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "dagster>=1.11,<2",
+  "dagster-webserver>=1.11,<2",
+  "kafka-python-ng>=2.2,<3",
+  "minio>=7.2,<8",
+  "requests>=2.32,<3",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["water_orchestration*"]
+
+[tool.dagster]
+module_name = "water_orchestration"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

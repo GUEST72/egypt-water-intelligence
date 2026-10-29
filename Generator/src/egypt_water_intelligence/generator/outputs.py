@@ -11,9 +11,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-import numpy as np
-import wntr
-import yaml
+import numpy as np # type: ignore
+import wntr # type: ignore
+import yaml # type: ignore
 
 from .config import RunConfig
 from .simulation import SECONDS_PER_MINUTE, SimulationResult, district_id

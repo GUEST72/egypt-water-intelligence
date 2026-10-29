@@ -1,0 +1,104 @@
+# Live demo dataset: small and fast, replayed into the separate demo.* Kafka namespace while the
+# Grafana board is on screen. Never part of the main pipeline's batch or lakehouse tables.
+#
+# 2 days, 6 districts (Flink job3b needs exactly six), 30 meters per district. Emitter coefficients are the
+# pilot values x 0.3 (30 instead of 100 meters per district), so each leak keeps the same size relative to
+# district flow. Incidents do not overlap; at replay speed 480 one appears on screen roughly every 40 seconds.
+schema_version: "1.0.0"
+run:
+  seed: 20261030
+  start_time_utc: "2026-02-01T00:00:00Z"
+  duration_minutes: 2880
+  output_root: output
+utility:
+  district_count: 6
+  meter_count: 180
+  timezone: Africa/Cairo
+demand:
+  customer_classes:
+    residential:
+      share: 0.9
+      baseline_mean_m3_s: 0.0000105
+      baseline_sigma: 0.35
+      profile_multiplier: 1.0
+    small_commercial:
+      share: 0.1
+      baseline_mean_m3_s: 0.000021
+      baseline_sigma: 0.30
+      profile_multiplier: 1.15
+  weekly_multipliers:
+    weekday: 1.0
+    thursday: 1.04
+    friday: 1.0
+    saturday: 0.98
+  friday_prayer:
+    enabled: true
+    start_local: "12:00"
+    end_local: "13:30"
+    residential_multiplier: 0.75
+    small_commercial_multiplier: 0.90
+    rebound_multiplier: 1.05
+    rebound_minutes: 60
+hydraulics:
+  engine: epanet_2_2
+  demand_model: PDD
+  hydraulic_timestep_seconds: 60
+  pattern_timestep_seconds: 60
+  report_timestep_seconds: 60
+  minimum_pressure_m: 5.0
+  required_pressure_m: 20.0
+  pressure_exponent: 0.5
+  source_head_m: 45.0
+  balance_tolerance_m3: 0.0001
+scenarios:
+  - scenario_id: demo-burst-d1
+    type: burst
+    district_id: D001
+    start_minute: 300
+    end_minute: 420
+    emitter_coefficient: 0.000036
+  - scenario_id: demo-supply-d3
+    type: supply_disturbance
+    district_id: D003
+    start_minute: 600
+    end_minute: 720
+    source_head_delta_m: -30.0
+  - scenario_id: demo-surge-d4
+    type: demand_surge
+    district_id: D004
+    start_minute: 900
+    end_minute: 1020
+    demand_multiplier: 1.6
+  - scenario_id: demo-gradual-d2
+    type: gradual_leak
+    district_id: D002
+    start_minute: 1200
+    end_minute: 1920
+    emitter_coefficient: 0.000024
+    stages: 3
+  - scenario_id: demo-burst-d5
+    type: burst
+    district_id: D005
+    start_minute: 2100
+    end_minute: 2190
+    emitter_coefficient: 0.000036
+  - scenario_id: demo-supply-d6
+    type: supply_disturbance
+    district_id: D006
+    start_minute: 2400
+    end_minute: 2490
+    source_head_delta_m: -25.0
+sensor:
+  noise_relative_stddev: 0.0
+faults:
+  - stream: district         # 17,280 rows -> 17 nulls (data-quality alerts on screen)
+    type: null_value
+    every_n: 997
+    field: pressure_m_h2o
+  - stream: district         # -> 11 duplicate copies (Flink deduplicates them)
+    type: duplicate
+    every_n: 1499
+  - stream: meter
+    type: null_value
+    every_n: 2003
+    field: consumed_volume_m3
