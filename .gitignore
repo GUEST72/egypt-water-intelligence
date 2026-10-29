@@ -11,6 +11,7 @@ orchestration/.dagster_home/
 
 # Private notes
 *.local.md
+*.local.docx
 
 # Dashboard material is generated locally and not versioned
 /dashboards/

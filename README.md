@@ -12,6 +12,11 @@ Generator → Kafka ─┬→ Archiver → MinIO → Spark batch ─┐
                                      └→ live bridge → Grafana (live)
 ```
 
+![The pipeline, animated](docs/images/pipeline-flow.gif)
+
+For the interactive version (click any component, step-by-step tour, presentation mode), open
+[docs/pipeline-diagram.html](docs/pipeline-diagram.html) in a browser.
+
 ## Quick start (Windows PowerShell)
 
 ```powershell

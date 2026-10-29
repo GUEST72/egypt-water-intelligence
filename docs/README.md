@@ -2,6 +2,10 @@
 
 Read these in order the first time. Each one explains *what* happens and *why*, with screenshots from a real run.
 
+Start with the **[interactive pipeline diagram](pipeline-diagram.html)** (open it in a browser): click any component
+for what it does and how Dagster proves it, or use ◀ ▶ for an 11-step tour. **Present** (or `F`) switches to a
+full-screen layout for presentations. `pipeline-diagram.html#present&step=5` opens it directly at a step.
+
 | # | Document | You will understand |
 |---|---|---|
 | 1 | [Overview](01-overview.md) | what the project does, the story of one run, the tools and the dataset |

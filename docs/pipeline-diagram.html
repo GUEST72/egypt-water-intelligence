@@ -1,0 +1,600 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Water Pipeline Flow</title>
+<style>
+  :root {
+    --bg: #f4f6f9; --surface: #ffffff; --surface-2: #f8f9fb; --ink: #17202b; --muted: #5b6672; --line: #d3d9e1;
+    --stream: #2a78d6; --batch: #eb6834; --live: #1baf7a; --serve: #eda100; --eval: #e87ba4; --upload: #8a94a0;
+    --shadow: 0 1px 2px rgba(20, 30, 45, .06), 0 6px 18px rgba(20, 30, 45, .06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0e1319; --surface: #161d26; --surface-2: #1b2430; --ink: #e8edf3; --muted: #9ba7b4; --line: #2c3744;
+      --stream: #3987e5; --batch: #d95926; --live: #199e70; --serve: #c98500; --eval: #d55181; --upload: #6f7a86;
+      --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0e1319; --surface: #161d26; --surface-2: #1b2430; --ink: #e8edf3; --muted: #9ba7b4; --line: #2c3744;
+    --stream: #3987e5; --batch: #d95926; --live: #199e70; --serve: #c98500; --eval: #d55181; --upload: #6f7a86;
+    --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 6px 18px rgba(0, 0, 0, .25);
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.5 "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  .mono, code { font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace; }
+
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px;
+    padding: 18px 24px 10px; max-width: 1760px; margin: 0 auto;
+  }
+  header h1 { font-size: 20px; margin: 0; letter-spacing: -.01em; }
+  header p { margin: 2px 0 0; color: var(--muted); font-size: 13.5px; }
+  .controls { margin-left: auto; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  button {
+    font: inherit; font-size: 13.5px; color: var(--ink); background: var(--surface);
+    border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  button:focus-visible, .node:focus-visible { outline: 2px solid var(--stream); outline-offset: 2px; }
+  button[aria-pressed="true"] { background: var(--ink); color: var(--surface); border-color: var(--ink); }
+  .stepper { display: flex; align-items: center; gap: 6px; }
+  .stepper span { min-width: 92px; text-align: center; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+  .legend {
+    display: flex; flex-wrap: wrap; gap: 6px 18px; padding: 0 24px 12px; max-width: 1760px; margin: 0 auto;
+    font-size: 12.5px; color: var(--muted);
+  }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+  .legend i.sq { border-radius: 2px; }
+  .legend b { font-weight: 600; color: var(--ink); }
+
+  main {
+    display: grid; grid-template-columns: minmax(0, 1fr) 380px; gap: 16px;
+    padding: 0 24px 24px; max-width: 1760px; margin: 0 auto;
+  }
+  @media (max-width: 1150px) { main { grid-template-columns: minmax(0, 1fr); } }
+  @media (max-width: 600px) {
+    header, .legend { padding-left: 16px; padding-right: 16px; }
+    main { padding: 0 16px 16px; }
+  }
+  figure {
+    margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); padding: 8px; overflow: hidden;
+  }
+  svg { display: block; width: 100%; height: auto; }
+
+  aside {
+    background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+    padding: 20px 22px; align-self: start; position: sticky; top: 12px;
+  }
+  .kicker { font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  aside h2 { font-size: 19px; margin: 4px 0 10px; letter-spacing: -.01em; }
+  aside p { margin: 0 0 10px; font-size: 14px; }
+  dl { margin: 12px 0 0; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; font-size: 13px; }
+  dt { color: var(--muted); }
+  dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .proof {
+    margin-top: 14px; padding: 10px 12px; border-radius: 10px; background: var(--surface-2);
+    border-left: 3px solid var(--ink); font-size: 13px;
+  }
+  .proof b { display: block; font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+  .proof:empty { display: none; }
+  .hint { margin-top: 16px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }
+  kbd {
+    font: 11px "Cascadia Mono", Consolas, monospace; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 4px; padding: 0 4px; background: var(--surface-2);
+  }
+
+  /* diagram */
+  .node { cursor: pointer; transition: opacity .35s; }
+  .node .box { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; transition: stroke .2s; }
+  .node:hover .box, .node.sel .box { stroke: var(--ink); }
+  .node .accent { fill: var(--c); }
+  .node .ttl { font-size: 16px; font-weight: 650; fill: var(--ink); }
+  .node .ln { font-size: 14px; fill: var(--muted); }
+  .node .ln.mono { font-size: 11px; }
+  .node .val { font-size: 14px; fill: var(--ink); font-variant-numeric: tabular-nums; text-anchor: end; }
+  .node .sub .box { fill: var(--surface-2); }
+  .node .sub .ttl { font-size: 14.5px; }
+  .node .sub .ln { font-size: 12.5px; }
+  .node .pill rect { fill: var(--surface-2); stroke: var(--pc); stroke-width: 1.2; }
+  .node .pill .ttl { font-size: 13.5px; }
+  .node .pill .ln { font-size: 12px; }
+  .node.k-dag .box { fill: var(--surface-2); stroke: var(--ink); stroke-dasharray: 5 4; }
+  .badge circle { fill: var(--ink); }
+  .badge text { fill: var(--surface); font-size: 11.5px; font-weight: 700; text-anchor: middle; }
+  .pulse .badge circle { animation: pulse 1.4s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+  @keyframes pulse { 50% { transform: scale(1.35); } }
+
+  .k-stream { --c: var(--stream); } .k-batch { --c: var(--batch); } .k-live { --c: var(--live); }
+  .k-serve { --c: var(--serve); } .k-eval { --c: var(--eval); } .k-upload { --c: var(--upload); }
+  .k-store { --c: var(--muted); } .k-lake { --c: var(--ink); } .k-dag { --c: var(--ink); }
+
+  .edge { fill: none; stroke: var(--c); stroke-width: 2; stroke-opacity: .5; transition: opacity .35s; }
+  .edge.on { stroke-opacity: .9; stroke-width: 2.6; }
+  .elabel { font-size: 13px; fill: var(--muted); paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; transition: opacity .35s; }
+  .particles { transition: opacity .35s; }
+  .particles * { fill: var(--c); }
+  .stats .box { fill: var(--surface-2); stroke: var(--line); }
+  .stats .ttl { font-size: 15px; font-weight: 650; fill: var(--ink); }
+  .stats .num { font-size: 26px; font-weight: 700; fill: var(--ink); font-variant-numeric: tabular-nums; }
+  .stats .lbl { font-size: 13.5px; fill: var(--muted); }
+  .dim { opacity: .16 !important; }
+  .particles.dim { opacity: 0; }
+
+  /* presentation: diagram fills the screen, the step title moves to the header */
+  #caption { display: none; font-size: 22px; font-weight: 650; letter-spacing: -.01em; }
+  #caption small { display: block; font-size: 12px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  body.present { min-height: 100vh; }
+  body.present header { padding-top: 12px; max-width: none; }
+  body.present header > div:first-child, body.present .legend { display: none; }
+  body.present #caption { display: block; }
+  body.present main { grid-template-columns: minmax(0, 1fr); max-width: none; }
+  body.present aside { display: none; }
+  body.present figure { border: 0; box-shadow: none; background: transparent; padding: 0; }
+  body.present svg { max-height: calc(100vh - 80px); }
+
+  @media (prefers-reduced-motion: reduce) {
+    .particles { display: none; }
+    .edge { stroke-dasharray: 6 5; }
+    .pulse .badge circle { animation: none; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>Where does the water go? — the data pipeline</h1>
+    <p>Egypt Water Intelligence · one generated run (run-72b96af88a342375) flowing through streaming and batch paths, orchestrated by Dagster</p>
+  </div>
+  <div id="caption"></div>
+  <div class="controls">
+    <div class="stepper" role="group" aria-label="Guided tour">
+      <button id="prev" aria-label="Previous step">◀</button>
+      <span id="stepLabel">Overview</span>
+      <button id="next" aria-label="Next step">▶</button>
+    </div>
+    <button id="auto" aria-pressed="false">Auto tour</button>
+    <button id="flow" aria-pressed="true">Flow on</button>
+    <button id="theme">Theme</button>
+    <button id="full">Present</button>
+  </div>
+</header>
+
+<div class="legend" aria-hidden="true">
+  <span><i style="background:var(--stream)"></i><b>Streaming</b> events</span>
+  <span><i class="sq" style="background:var(--batch)"></i><b>Batch</b> files</span>
+  <span><i style="background:var(--live)"></i><b>Live</b> board</span>
+  <span><i class="sq" style="background:var(--serve)"></i><b>Serving</b> tables</span>
+  <span><i style="background:var(--eval)"></i><b>Evaluation</b> only</span>
+  <span><i style="background:var(--upload)"></i><b>Upload</b> of files</span>
+  <span><i style="background:var(--ink)"></i><b>D</b> = verified by a Dagster asset</span>
+</div>
+
+<main>
+  <figure>
+    <svg id="dia" viewBox="0 0 1860 940" role="img" aria-labelledby="diaTitle diaDesc">
+      <title id="diaTitle">Pipeline diagram</title>
+      <desc id="diaDesc">The generator publishes to Kafka. The archiver copies Kafka into MinIO, where Spark builds the batch tables in Iceberg.
+        Four Flink jobs detect incidents from the district stream; their results go to a live Grafana board and, through a bounded Spark load, into Iceberg.
+        Trino builds marts on Iceberg for Power BI. The answer key is used only by the evaluation. Dagster orchestrates and verifies every step.</desc>
+      <defs id="defs"></defs>
+      <g id="edges"></g>
+      <g id="parts"></g>
+      <g id="nodes"></g>
+    </svg>
+  </figure>
+
+  <aside aria-live="polite">
+    <div class="kicker" id="pKicker">Overview</div>
+    <h2 id="pTitle">The whole pipeline</h2>
+    <div id="pBody"></div>
+    <dl id="pFacts"></dl>
+    <div class="proof" id="pProof"></div>
+    <div class="hint">Click any component for details. <kbd>←</kbd> <kbd>→</kbd> step through the tour,
+      <kbd>Space</kbd> pause the flow, <kbd>F</kbd> present (fullscreen), <kbd>Esc</kbd> back to the overview.</div>
+  </aside>
+</main>
+
+<script>
+(() => {
+  const NS = "http://www.w3.org/2000/svg";
+  const el = (tag, attrs = {}, parent) => {
+    const e = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+
+  // ---------------------------------------------------------------- components
+  // lines: "text", "`mono text", or [label, value]
+  const NODES = [
+    { id: "dagster", kind: "dag", x: 30, y: 18, w: 1810, h: 58, inline: true, title: "Dagster",
+      line: "orchestrates every stage  ·  one partition per dataset run  ·  proves each step complete before the next starts  ·  re-runs skip verified work" },
+    { id: "gen", kind: "upload", x: 30, y: 380, w: 190, h: 110, title: "Generator", asset: true,
+      lines: ["EPANET simulation", "6 districts · 1,500 meters", "25 days · 13 incidents"] },
+    { id: "kafka", kind: "stream", x: 260, y: 370, w: 200, h: 130, title: "Kafka · raw topics", asset: true,
+      lines: [["district-sensors", "216,071"], ["meter-readings", "3,600,454"], "published once · resumable"] },
+    { id: "flink", kind: "stream", x: 510, y: 110, w: 490, h: 230, title: "Apache Flink · 4 continuous jobs", asset: true,
+      jobs: [["Validation", "dedup event_id", "→ dead-letter"], ["Features", "15-min windows", "per district"],
+             ["Alerts", "R1 · R2 · R3", "vs peer median"], ["Level shift", "R4 · daily level", "vs last 6 days"]],
+      footer: "district stream only  ·  chained through Kafka  ·  checkpoint every 30 s" },
+    { id: "derived", kind: "stream", x: 1050, y: 110, w: 190, h: 230, title: "Kafka · derived",
+      lines: [["clean", "216,000"], ["features.15m", "14,394"], ["relative.15m", "14,388"], ["alerts", "140"], ["dead-letter", "0"]] },
+    { id: "bridge", kind: "live", x: 1290, y: 124, w: 170, h: 112, title: "Live bridge",
+      lines: ["Kafka → Postgres live", "idempotent upserts", "throughput every 2 s"] },
+    { id: "grafana", kind: "live", x: 1510, y: 124, w: 170, h: 112, title: "Grafana",
+      lines: ["live operations board", "refresh every 5 s", "read-only role"] },
+    { id: "sparkload", kind: "stream", x: 1030, y: 390, w: 230, h: 112, title: "Spark · bounded load", asset: true,
+      lines: ["`load_streaming.py", "to frozen end offsets", "dedup · tag run_id"] },
+    { id: "archiver", kind: "batch", x: 510, y: 580, w: 170, h: 110, title: "Archiver",
+      lines: ["at-least-once", "commits after write", "auto-restart"] },
+    { id: "archive", kind: "store", x: 710, y: 580, w: 260, h: 110, title: "MinIO · water-events", asset: true,
+      lines: ["`part-<p>-<first>-<last>.ndjson.gz", "723 files · 0 gaps · 0 overlaps", "`archive-manifest.json"] },
+    { id: "sparkbatch", kind: "batch", x: 1010, y: 580, w: 210, h: 110, title: "Spark · batch build", asset: true,
+      lines: ["clean · dedup · reject", "15-min water balance", "star schema (Gold)"] },
+    { id: "iceberg", kind: "lake", x: 1290, y: 380, w: 180, h: 310, title: "Apache Iceberg",
+      pills: [["analytics", "silver", "batch"], ["gold", "star schema", "batch"], ["streaming", "Flink", "stream"],
+              ["evaluation", "scores", "eval"], ["marts", "Trino", "serve"]],
+      footer: ["catalog · PostgreSQL JDBC", "files · MinIO warehouse"] },
+    { id: "trino", kind: "serve", x: 1520, y: 420, w: 150, h: 120, title: "Trino", asset: true,
+      lines: ["4 marts per run", "batch ⋈ streaming", "rebuilt per run"] },
+    { id: "powerbi", kind: "serve", x: 1710, y: 420, w: 130, h: 120, title: "Power BI", asset: true,
+      lines: ["3 report pages", "Parquet exports"] },
+    { id: "waterraw", kind: "store", x: 710, y: 790, w: 260, h: 112, title: "MinIO · water-raw", asset: true,
+      lines: ["district & meter reference files", "`_RUN_COMPLETE written last"] },
+    { id: "restricted", kind: "eval", x: 1010, y: 790, w: 210, h: 112, title: "MinIO · restricted",
+      lines: ["answer key (planted truth)", "read only by evaluation"] },
+    { id: "evaluation", kind: "eval", x: 1290, y: 790, w: 180, h: 112, title: "Evaluation", asset: true,
+      lines: ["after detection only", "12 / 12 incidents found", "precision 0.94"] },
+  ];
+
+  const EDGES = [
+    { id: "pub", from: "gen", to: "kafka", kind: "stream", d: "M220 435 H260" },
+    { id: "kflink", from: "kafka", to: "flink", kind: "stream", d: "M460 400 C494 400 494 220 524 220" },
+    { id: "f1", from: "flink", to: "flink", kind: "stream", d: "M630 220 H644" },
+    { id: "f2", from: "flink", to: "flink", kind: "stream", d: "M750 220 H764" },
+    { id: "f3", from: "flink", to: "flink", kind: "stream", d: "M870 220 H884" },
+    { id: "fder", from: "flink", to: "derived", kind: "stream", d: "M990 220 H1050" },
+    { id: "bridge", from: "derived", to: "bridge", kind: "live", d: "M1240 180 H1290" },
+    { id: "graf", from: "bridge", to: "grafana", kind: "live", d: "M1460 180 H1510" },
+    { id: "dload", from: "derived", to: "sparkload", kind: "stream", d: "M1145 340 V390" },
+    { id: "loadice", from: "sparkload", to: "iceberg", kind: "stream", d: "M1260 440 H1290" },
+    { id: "karch", from: "kafka", to: "archiver", kind: "stream", d: "M360 500 C360 635 440 635 510 635",
+      label: ["both topics", 384, 590] },
+    { id: "archobj", from: "archiver", to: "archive", kind: "batch", d: "M680 635 H710" },
+    { id: "objspark", from: "archive", to: "sparkbatch", kind: "batch", d: "M970 635 H1010" },
+    { id: "sparkice", from: "sparkbatch", to: "iceberg", kind: "batch", d: "M1220 635 H1290" },
+    { id: "genraw", from: "gen", to: "waterraw", kind: "upload", d: "M125 490 V840 H710", label: ["reference files + marker", 420, 832] },
+    { id: "genres", from: "gen", to: "restricted", kind: "upload", d: "M95 490 V925 H1115 V902", label: ["answer key", 420, 917] },
+    { id: "rawspark", from: "waterraw", to: "sparkbatch", kind: "batch", d: "M840 790 C840 745 1070 745 1070 690",
+      label: ["reference", 955, 738] },
+    { id: "reseval", from: "restricted", to: "evaluation", kind: "eval", d: "M1220 840 H1290" },
+    { id: "evalice", from: "evaluation", to: "iceberg", kind: "eval", d: "M1380 790 V690" },
+    { id: "icetrino", from: "iceberg", to: "trino", kind: "serve", d: "M1470 480 H1520" },
+    { id: "trinopbi", from: "trino", to: "powerbi", kind: "serve", d: "M1670 480 H1710" },
+  ];
+
+  const FLOW = { // speed px/s, spacing px, shape
+    stream: [130, 34, "dot"], live: [110, 40, "dot"], eval: [45, 60, "dot"], upload: [45, 70, "dot"],
+    batch: [55, 60, "sq"], serve: [55, 60, "sq"],
+  };
+
+  // ---------------------------------------------------------------- details
+  const INFO = {
+    dagster: { kicker: "Orchestration", title: "Dagster",
+      body: ["Runs on the host and drives the containers with the same commands a person would type, so nothing is hidden. Each dataset run is a partition, and each of the eleven assets checks its own output before the next one may start.",
+             "Markers stored next to the data (_RUN_COMPLETE, stream.json, archive-manifest.json, batch_manifest) make re-runs safe even if Dagster's own history is deleted."],
+      facts: [["Assets", "11, in 7 groups"], ["Jobs", "8 (incl. full_pipeline, live_demo)"], ["Sensors", "2, off by default"], ["Spark", "one job at a time (tag limit)"], ["Re-run", "4.2 min, every verified step skipped"]] },
+    gen: { kicker: "Source", title: "Generator",
+      body: ["Simulates the water network with EPANET at 1-minute resolution and plants 13 incidents on purpose: bursts, gradual leaks, demand surges, supply disturbances, a persistent loss and a constant background loss.",
+             "It writes what real sensors would send, including 1,353 deliberate data faults (null measures, duplicate events), and a separate answer key."],
+      facts: [["Run", "run-72b96af88a342375"], ["Config", "configs/pipeline-large.yml"], ["Scale", "6 districts · 1,500 meters · 25 days"]],
+      proof: "generator_run: the generator's own validation passes and line counts equal the manifest; skipped when the files have not changed." },
+    kafka: { kicker: "Streaming · ingest", title: "Kafka raw topics",
+      body: ["The publisher sends every record in availability-time order, the order readings would arrive in reality. The archiver, the four Flink jobs and the live bridge each read with their own consumer group, so each sees every message at its own pace."],
+      facts: [["water.district-sensors.v1", "216,071"], ["water.meter-readings.v1", "3,600,454"], ["Broker", "Kafka 3.7 (KRaft)"]],
+      proof: "kafka_delivery_streams: Kafka gains exactly the manifest's counts and a run is published once. After a broker hiccup at 3,316,405 records, a verified resume sent only the remaining 500,120." },
+    flink: { kicker: "Streaming · detection", title: "Apache Flink, four jobs",
+      body: ["Validation removes duplicate events and sends malformed records to a dead-letter topic. Features builds 15-minute windows per district. Alerts compares each district with the median of the other five (R1 flow anomaly, R2 supply disturbance, R3 data quality). Level shift compares each day with the district's previous six days (R4 persistent loss).",
+             "Only the district stream is analysed in real time; meter readings go to the archive for the batch water balance."],
+      facts: [["Engine", "Flink 1.20, PyFlink"], ["Slots", "4 (one per job)"], ["Job names", "ewi-validation … ewi-level_shift"]],
+      proof: "flink_district_outputs: each job's committed offset reaches the end of its input, job by job; the output end offsets are then frozen for this run." },
+    derived: { kicker: "Streaming · results", title: "Flink output topics",
+      body: ["Flink writes only to Kafka. These topics feed both the live board and the lakehouse.",
+             "In a finite replay the last 15-minute window never closes, so there are 6 × 2,399 = 14,394 feature windows, not 14,400."],
+      facts: [["…sensors.clean.v1", "216,000 (71 duplicates removed)"], ["…features.15m.v1", "14,394"], ["…relative.15m.v1", "14,388"], ["…district-alerts.v1", "140"], ["dead-letter.district.v1", "0"]] },
+    bridge: { kicker: "Live", title: "Live bridge",
+      body: ["A small always-on service that reads Flink's output topics and upserts them into a live schema in PostgreSQL, keyed by alert_id or district + window, so reading a message twice never duplicates a row.",
+             "Every 2 seconds it also records the topics' end offsets, which the board turns into events per second."] },
+    grafana: { kicker: "Live", title: "Grafana live board",
+      body: ["The operational view of the streaming path: each district's flow relative to its peers, the detector state per 15-minute window, incident alerts and throughput. Refreshes every 5 seconds, anonymous viewer, read-only database role.",
+             "The live_demo job replays a two-day dataset into a separate demo. namespace in about six minutes, without touching the main run."] },
+    sparkload: { kicker: "Streaming → lakehouse", title: "Spark bounded load",
+      body: ["Copies Flink's results into Iceberg without changing the Flink jobs. Flink's rows carry no run_id, so the read is bounded by the end offsets frozen when Flink was verified: nothing published later can be mixed in.",
+             "Flink's Kafka sinks are at-least-once, so alerts are de-duplicated on alert_id and windows on district + window start."],
+      facts: [["fact_district_alert", "140"], ["fact_district_window_15m", "14,394"], ["fact_dead_letter", "0"]],
+      proof: "streaming_iceberg_facts: water.streaming tables written for this run's partition only." },
+    archiver: { kicker: "Batch · landing", title: "Archiver",
+      body: ["Buffers messages per topic and partition and writes one gzip file every 10,000 messages or 30 seconds. It commits its Kafka position only after the file is safely in MinIO, so a crash means re-reading, never losing data. Restarts automatically."] },
+    archive: { kicker: "Batch · landing", title: "The Kafka archive",
+      body: ["The permanent copy of the stream (Kafka keeps messages for 7 days). Every file name holds the Kafka offsets it contains, so coverage can be checked without opening the files."],
+      facts: [["Files", "723"], ["Gaps / overlaps", "0 / 0"], ["Content", "every line identical to the source"]],
+      proof: "raw_event_archive: the archiver's committed offset is past the last published one and the file ranges tile it with no gap. Writes archive-manifest.json, the batch job's entry ticket." },
+    sparkbatch: { kicker: "Batch · processing", title: "Spark batch build",
+      body: ["The batch team's cleaning, water-balance and star-schema logic, reading exactly the archive files listed in the manifest. Water in vs water metered per district and 15 minutes; incomplete intervals get no gap value rather than a misleading one.",
+             "Incremental by run: a missing marker raises SourceNotReady, an unchanged input fingerprint is skipped, and each write replaces only its own run_id partition."],
+      facts: [["District", "215,892 accepted · 108 rejected · 71 dup."], ["Meter", "3,599,280 accepted · 720 rejected · 454 dup."]],
+      proof: "batch_silver_gold reports completed (or skipped); batch_validation re-derives everything independently and reports passed." },
+    iceberg: { kicker: "Lakehouse", title: "Apache Iceberg",
+      body: ["Open table format on MinIO. Spark writes and Trino reads the same tables through one catalog in PostgreSQL: nothing is copied between engines. Every table is partitioned by run_id, so runs never overwrite each other."],
+      facts: [["analytics", "clean events, rejects, water balance, batch_manifest"], ["gold", "dimensions, facts, daily aggregates"], ["streaming", "Flink alerts and windows"], ["evaluation", "scores per scenario"], ["marts", "four dashboard marts"]] },
+    trino: { kicker: "Serving", title: "Trino marts",
+      body: ["Where the two paths meet. Four marts in plain SQL, rebuilt per run (DELETE this run, then INSERT): incidents, incident balance, district daily overview, hourly profile.",
+             "District sensors alone cannot tell a burst from a demand surge. mart_incident_balance asks the meters: every leak came out loss_like, every surge demand_like, every supply disturbance supply_like, without using the answer key."],
+      proof: "dashboard_marts: row counts per mart (17 incidents, 150 district-days, 1,008 hourly profiles)." },
+    powerbi: { kicker: "Serving", title: "Power BI",
+      body: ["Three report pages built on Parquet exports of the marts and Gold tables: network overview, incidents, consumption and data quality."],
+      proof: "dashboard_exports: one Parquet file per table, rows reported." },
+    waterraw: { kicker: "Landing", title: "MinIO water-raw",
+      body: ["Reference files (districts, meters) and the run manifest, uploaded straight from the generator's output. _RUN_COMPLETE is written last, so a half-uploaded run is never read. Events never come from here: Spark reads them from the Kafka archive."],
+      proof: "raw_run_upload: every object's size equals the local file; the marker goes last; a completed run is only verified, never re-uploaded." },
+    restricted: { kicker: "Evaluation only", title: "The answer key",
+      body: ["Where and when incidents and faults were planted. It is never an input to ingestion, streaming or batch; only the evaluation opens it, after detection has finished."] },
+    evaluation: { kicker: "Evaluation", title: "Alert evaluation",
+      body: ["Matches Flink's alerts with the planted incidents using the Flink team's rules, and requires exactly the same numbers from their original evaluate_alerts.py. Results are written to water.evaluation.",
+             "The single false alarm: D004 on Jan 21, the moment D005's persistent loss ended and lowered the peer median D004 is compared with."],
+      facts: [["Detectable incidents", "12 / 12 found"], ["Precision", "0.94 (1 false alarm)"], ["Null faults flagged", "108 / 108"], ["Delay", "30 min bursts & surges, 45–60 min supply, 1 day R4"]],
+      proof: "alert_evaluation: the only asset allowed to read water-restricted." },
+  };
+
+  // ---------------------------------------------------------------- tour
+  const ALL = null;
+  const STEPS = [
+    { title: "The whole pipeline", kicker: "Overview", nodes: ALL, edges: ALL,
+      body: ["A simulated city water network produces sensor data. The same data flows down two paths: a streaming path that detects incidents within minutes, and a batch path that reconciles every drop of water in vs water metered.",
+             "Both land in one Iceberg lakehouse, where Trino joins them for the dashboards. Dagster runs every stage and proves it complete."] },
+    { title: "Generate a dataset", nodes: ["gen"], edges: [], info: "gen" },
+    { title: "Land the reference files and the answer key", nodes: ["gen", "waterraw", "restricted"], edges: ["genraw", "genres"], info: "waterraw" },
+    { title: "Publish the stream into Kafka", nodes: ["gen", "kafka"], edges: ["pub"], info: "kafka" },
+    { title: "Archive the stream, and prove it is complete", nodes: ["kafka", "archiver", "archive"], edges: ["karch", "archobj"], info: "archive" },
+    { title: "Detect incidents in real time", nodes: ["kafka", "flink", "derived"], edges: ["kflink", "f1", "f2", "f3", "fder"], info: "flink" },
+    { title: "Watch it live", nodes: ["derived", "bridge", "grafana"], edges: ["bridge", "graf"], info: "grafana" },
+    { title: "Batch: clean, balance, model", nodes: ["archive", "waterraw", "sparkbatch", "iceberg"], edges: ["objspark", "rawspark", "sparkice"], info: "sparkbatch" },
+    { title: "Streaming results into the lakehouse", nodes: ["derived", "sparkload", "iceberg"], edges: ["dload", "loadice"], info: "sparkload" },
+    { title: "Score the detection against the answer key", nodes: ["restricted", "evaluation", "iceberg"], edges: ["reseval", "evalice"], info: "evaluation" },
+    { title: "Join both paths for the dashboards", nodes: ["iceberg", "trino", "powerbi"], edges: ["icetrino", "trinopbi"], info: "trino" },
+    { title: "Dagster holds it together", nodes: ALL, edges: ALL, info: "dagster", pulse: true },
+  ];
+
+  // ---------------------------------------------------------------- render
+  const svg = document.getElementById("dia");
+  const gEdges = document.getElementById("edges"), gParts = document.getElementById("parts"), gNodes = document.getElementById("nodes");
+  const defs = document.getElementById("defs");
+
+  for (const kind of Object.keys(FLOW)) {
+    const m = el("marker", { id: `arr-${kind}`, viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse", class: `k-${kind}` }, defs);
+    el("path", { d: "M0 0 L10 5 L0 10 z", style: "fill: var(--c)" }, m);
+  }
+
+  const text = (parent, x, y, str, cls) => {
+    const mono = str.startsWith("`");
+    const t = el("text", { x, y, class: cls + (mono ? " mono" : "") }, parent);
+    t.textContent = mono ? str.slice(1) : str;
+    return t;
+  };
+
+  const nodeEls = {};
+  for (const n of NODES) {
+    const g = el("g", { class: `node k-${n.kind}`, "data-id": n.id, tabindex: 0, role: "button", "aria-label": INFO[n.id].title }, gNodes);
+    nodeEls[n.id] = g;
+    el("rect", { class: "box", x: n.x, y: n.y, width: n.w, height: n.h, rx: 12 }, g);
+    if (n.inline) {
+      text(g, n.x + 22, n.y + 36, n.title, "ttl").style.fontSize = "17px";
+      text(g, n.x + 110, n.y + 35, n.line, "ln");
+      const b = el("g", { class: "badge", transform: `translate(${n.x + n.w - 300} ${n.y + 31})` }, g);
+      el("circle", { r: 9 }, b); el("text", { y: 4 }, b).textContent = "D";
+      text(g, n.x + n.w - 284, n.y + 35, "= step verified by a Dagster asset", "ln");
+      continue;
+    }
+    el("rect", { class: "accent", x: n.x, y: n.y + 14, width: 4, height: n.h - 28, rx: 2 }, g);
+    text(g, n.x + 18, n.y + 28, n.title, "ttl");
+    (n.lines || []).forEach((line, i) => {
+      const y = n.y + 54 + i * 21;
+      if (Array.isArray(line)) {
+        text(g, n.x + 18, y, line[0], "ln");
+        text(g, n.x + n.w - 16, y, line[1], "val");
+      } else text(g, n.x + 18, y, line, "ln");
+    });
+    if (n.jobs) n.jobs.forEach(([name, a, b], i) => {
+      const x = n.x + 14 + i * 120, y = n.y + 64;
+      const s = el("g", { class: "sub" }, g);
+      el("rect", { class: "box", x, y, width: 106, height: 92, rx: 9 }, s);
+      text(s, x + 10, y + 24, name, "ttl");
+      text(s, x + 10, y + 50, a, "ln");
+      text(s, x + 10, y + 70, b, "ln");
+    });
+    if (n.footer && !n.pills) text(g, n.x + 18, n.y + n.h - 26, n.footer, "ln");
+    if (n.pills) {
+      n.pills.forEach(([name, sub, kind], i) => {
+        const y = n.y + 46 + i * 40;
+        const p = el("g", { class: "pill", style: `--pc: var(--${kind})` }, g);
+        el("rect", { x: n.x + 16, y, width: n.w - 32, height: 32, rx: 8 }, p);
+        text(p, n.x + 28, y + 21, name, "ttl");
+        const s = text(p, n.x + n.w - 26, y + 20, sub, "ln"); s.setAttribute("text-anchor", "end");
+      });
+      n.footer.forEach((f, i) => text(g, n.x + 18, n.y + n.h - 40 + i * 20, f, "ln").style.fontSize = "13px");
+    }
+    if (n.asset) {
+      const b = el("g", { class: "badge", transform: `translate(${n.x + n.w - 18} ${n.y + 23})` }, g);
+      el("circle", { r: 10 }, b); el("text", { y: 4 }, b).textContent = "D";
+    }
+  }
+
+  // stats card (not interactive)
+  const stats = el("g", { class: "stats" }, gNodes);
+  el("rect", { class: "box", x: 510, y: 380, width: 490, height: 165, rx: 12 }, stats);
+  text(stats, 528, 410, "This run, verified end to end", "ttl");
+  [["216,071", "district messages"], ["3,600,454", "meter messages"], ["723 files", "archived · 0 gaps"],
+   ["12 / 12", "planted incidents found"], ["108 / 108", "null faults flagged"], ["4.2 min", "idempotent re-run"]]
+    .forEach(([num, lbl], i) => {
+      const x = 528 + (i % 3) * 160, y = 452 + Math.floor(i / 3) * 62;
+      text(stats, x, y, num, "num"); text(stats, x, y + 20, lbl, "lbl");
+    });
+
+  const edgeEls = {}, flows = [];
+  for (const e of EDGES) {
+    const p = el("path", { class: `edge k-${e.kind}`, d: e.d, "marker-end": `url(#arr-${e.kind})` }, gEdges);
+    const label = e.label ? text(gEdges, e.label[1], e.label[2], e.label[0], "elabel") : null;
+    if (label && e.label[1] > 900) label.setAttribute("text-anchor", "middle");
+    const [speed, spacing, shape] = FLOW[e.kind];
+    const len = p.getTotalLength();
+    const count = Math.max(1, Math.round(len / spacing));
+    const pg = el("g", { class: `particles k-${e.kind}` }, gParts);
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      items.push(shape === "sq" ? el("rect", { x: -4, y: -4, width: 8, height: 8, rx: 2 }, pg) : el("circle", { r: 3.4 }, pg));
+    }
+    edgeEls[e.id] = { path: p, label, pg };
+    flows.push({ path: p, len, speed, items, pg });
+  }
+
+  // ---------------------------------------------------------------- animation
+  let playing = !matchMedia("(prefers-reduced-motion: reduce)").matches, t = 0, last = null;
+  const flowBtn = document.getElementById("flow");
+  const setPlaying = (on) => { playing = on; flowBtn.setAttribute("aria-pressed", on); flowBtn.textContent = on ? "Flow on" : "Flow off"; };
+  setPlaying(playing);
+  function frame(ts) {
+    if (last !== null && playing) t += Math.min(0.1, (ts - last) / 1000);
+    last = ts;
+    for (const f of flows) {
+      if (f.pg.classList.contains("dim")) continue;
+      const n = f.items.length;
+      f.items.forEach((item, i) => {
+        const d = (t * f.speed + (i * f.len) / n) % f.len;
+        const pt = f.path.getPointAtLength(d);
+        item.setAttribute("transform", `translate(${pt.x.toFixed(1)} ${pt.y.toFixed(1)})`);
+        item.setAttribute("opacity", Math.min(1, d / 14, (f.len - d) / 14).toFixed(2));
+      });
+    }
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // ---------------------------------------------------------------- focus and panel
+  const $ = (id) => document.getElementById(id);
+  function focus(nodes, edges, selected, pulse) {
+    for (const [id, g] of Object.entries(nodeEls)) {
+      g.classList.toggle("dim", nodes !== null && !nodes.includes(id));
+      g.classList.toggle("sel", id === selected);
+    }
+    stats.classList.toggle("dim", nodes !== null);
+    for (const [id, e] of Object.entries(edgeEls)) {
+      const off = edges !== null && !edges.includes(id);
+      for (const x of [e.path, e.label, e.pg]) if (x) x.classList.toggle("dim", off);
+      e.path.classList.toggle("on", edges !== null && !off);
+    }
+    gNodes.classList.toggle("pulse", !!pulse);
+  }
+  function panel({ kicker, title, body = [], facts = [], proof = "" }) {
+    $("pKicker").textContent = kicker; $("pTitle").textContent = title;
+    $("pBody").replaceChildren(...body.map((b) => Object.assign(document.createElement("p"), { textContent: b })));
+    $("pFacts").replaceChildren(...facts.flatMap(([k, v]) => [
+      Object.assign(document.createElement("dt"), { textContent: k }), Object.assign(document.createElement("dd"), { textContent: v })]));
+    $("pProof").innerHTML = "";
+    if (proof) {
+      const b = document.createElement("b"); b.textContent = "Dagster proof";
+      $("pProof").append(b, proof);
+    }
+  }
+
+  let step = 0;
+  function showStep(i) {
+    step = (i + STEPS.length) % STEPS.length;
+    const s = STEPS[step];
+    focus(s.nodes, s.edges, null, s.pulse);
+    const info = s.info ? INFO[s.info] : {};
+    panel({ ...info, kicker: step ? `Step ${step} of ${STEPS.length - 1}` : "Overview", title: s.title, body: s.body || info.body });
+    $("stepLabel").textContent = step ? `Step ${step} / ${STEPS.length - 1}` : "Overview";
+    $("caption").innerHTML = "";
+    const small = document.createElement("small");
+    small.textContent = step ? `Step ${step} of ${STEPS.length - 1}` : "Egypt Water Intelligence";
+    $("caption").append(small, step ? s.title : "Where does the water go? The data pipeline");
+  }
+  function showNode(id) {
+    const edges = EDGES.filter((e) => e.from === id || e.to === id);
+    const nodes = [...new Set([id, ...edges.flatMap((e) => [e.from, e.to])])];
+    focus(id === "dagster" ? null : nodes, id === "dagster" ? null : edges.map((e) => e.id), id, id === "dagster");
+    panel(INFO[id]);
+  }
+
+  for (const [id, g] of Object.entries(nodeEls)) {
+    g.addEventListener("click", (ev) => { ev.stopPropagation(); stopAuto(); showNode(id); });
+    g.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); stopAuto(); showNode(id); } });
+  }
+  svg.addEventListener("click", () => showStep(0));
+
+  let autoTimer = null;
+  const autoBtn = $("auto");
+  function stopAuto() { clearInterval(autoTimer); autoTimer = null; autoBtn.setAttribute("aria-pressed", "false"); }
+  autoBtn.addEventListener("click", () => {
+    if (autoTimer) return stopAuto();
+    autoBtn.setAttribute("aria-pressed", "true");
+    showStep(step + 1);
+    autoTimer = setInterval(() => showStep(step + 1), 9000);
+  });
+  $("prev").addEventListener("click", () => { stopAuto(); showStep(step - 1); });
+  $("next").addEventListener("click", () => { stopAuto(); showStep(step + 1); });
+  flowBtn.addEventListener("click", () => setPlaying(!playing));
+  $("full").addEventListener("click", () => {
+    if (document.fullscreenElement) return document.exitFullscreen();
+    document.body.classList.add("present");
+    document.documentElement.requestFullscreen().catch(() => {});
+  });
+  document.addEventListener("fullscreenchange", () => {
+    document.body.classList.toggle("present", !!document.fullscreenElement);
+    $("full").textContent = document.fullscreenElement ? "Exit" : "Present";
+  });
+
+  const root = document.documentElement;
+  try { const saved = localStorage.getItem("ewi-theme"); if (saved) root.dataset.theme = saved; } catch (e) {}
+  $("theme").addEventListener("click", () => {
+    const dark = root.dataset.theme ? root.dataset.theme === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    root.dataset.theme = dark ? "light" : "dark";
+    try { localStorage.setItem("ewi-theme", root.dataset.theme); } catch (e) {}
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.target.closest && ev.target.closest(".node")) return;
+    if (ev.target.tagName === "BUTTON" && (ev.key === " " || ev.key === "Enter")) return;
+    if (ev.key === "ArrowRight" || ev.key === "PageDown") { stopAuto(); showStep(step + 1); }
+    else if (ev.key === "ArrowLeft" || ev.key === "PageUp") { stopAuto(); showStep(step - 1); }
+    else if (ev.key === " ") { ev.preventDefault(); setPlaying(!playing); }
+    else if (ev.key.toLowerCase() === "f") $("full").click();
+    else if (ev.key === "Escape") { stopAuto(); showStep(0); }
+  });
+
+  // pipeline-diagram.html#present&step=5 opens the presentation layout at a given step
+  const hash = new URLSearchParams(location.hash.slice(1));
+  if (hash.has("present")) document.body.classList.add("present");
+  // #loop=4 makes the flow repeat exactly every 4 s; #t=1.5 freezes it at that moment (used to export the GIF)
+  const loop = parseFloat(hash.get("loop"));
+  if (loop > 0) for (const f of flows) {
+    const gap = f.len / f.items.length;
+    f.speed = Math.max(1, Math.round((f.speed * loop) / gap)) * gap / loop;
+  }
+  if (hash.has("t")) { t = parseFloat(hash.get("t")) || 0; setPlaying(false); }
+  if (hash.has("theme")) root.dataset.theme = hash.get("theme");
+  showStep(parseInt(hash.get("step"), 10) || 0);
+})();
+</script>
+</body>
+</html>
